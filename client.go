@@ -7,10 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -19,7 +17,6 @@ import (
 )
 
 const DefaultBaseURL = "https://aws-us-east-1.hevlayer.com"
-const DefaultTurbopufferBaseURL = "https://aws-us-east-1.turbopuffer.com"
 
 const searchHistoryMaxTags = 32
 const searchHistoryMaxTagLength = 128
@@ -28,11 +25,6 @@ type Client struct {
 	baseURL string
 	apiKey string
 	httpClient *http.Client
-	turbopufferBaseURL string
-	turbopufferAPIKey string
-	turbopufferHTTPClient *http.Client
-	turbopufferHTTPClientExplicit bool
-	fallbackToTurbopuffer bool
 }
 
 type Option func(*Client)
@@ -40,14 +32,7 @@ type Option func(*Client)
 func NewClient(options ...Option) *Client {
 	client := &Client{
 		baseURL: DefaultBaseURL,
-		turbopufferBaseURL: DefaultTurbopufferBaseURL,
 		httpClient: http.DefaultClient,
-		turbopufferHTTPClient: http.DefaultClient,
-		turbopufferAPIKey: cleanToken(os.Getenv("TURBOPUFFER_API_KEY")),
-		fallbackToTurbopuffer: true,
-	}
-	if baseURL := strings.TrimSpace(os.Getenv("TURBOPUFFER_API_URL")); baseURL != "" {
-		client.turbopufferBaseURL = strings.TrimRight(baseURL, "/")
 	}
 	for _, option := range options {
 		option(client)
@@ -77,39 +62,9 @@ func WithHTTPClient(httpClient *http.Client) Option {
 	}
 }
 
-func WithTurbopufferAPIKey(apiKey string) Option {
-	return func(client *Client) {
-		client.turbopufferAPIKey = cleanToken(apiKey)
-	}
-}
-
-func WithTurbopufferBaseURL(baseURL string) Option {
-	return func(client *Client) {
-		if strings.TrimSpace(baseURL) != "" {
-			client.turbopufferBaseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
-		}
-	}
-}
-
-func WithTurbopufferHTTPClient(httpClient *http.Client) Option {
-	return func(client *Client) {
-		if httpClient != nil {
-			client.turbopufferHTTPClient = httpClient
-			client.turbopufferHTTPClientExplicit = true
-		}
-	}
-}
-
-func WithFallbackToTurbopuffer(enabled bool) Option {
-	return func(client *Client) {
-		client.fallbackToTurbopuffer = enabled
-	}
-}
-
 type LayerPerf struct {
 	LatencyMS float64 `json:"latency_ms"`
 	CacheStatus string `json:"cache_status,omitempty"`
-	Fallback string `json:"fallback,omitempty"`
 }
 
 type LayerResponse[T any] struct {
@@ -146,10 +101,9 @@ type requestOptions struct {
 	err error
 }
 
-type turbopufferFallback struct {
-	method string
-	path string
-	transform string
+type rawBody struct {
+	data []byte
+	contentType string
 }
 
 type HevlayerError struct {
@@ -181,6 +135,40 @@ func (params *FetchDocumentParams) query() (url.Values, error) {
 	return query, nil
 }
 
+type GetCostSnapshotParams struct {
+	Window CostWindow `json:"window,omitempty"`
+}
+
+func (params *GetCostSnapshotParams) query() (url.Values, error) {
+	query := url.Values{}
+	if params == nil {
+		return query, nil
+	}
+	if err := addQueryValue(query, "window", params.Window); err != nil {
+		return nil, err
+	}
+	return query, nil
+}
+
+type GetCostTimeseriesParams struct {
+	Window CostWindow `json:"window,omitempty"`
+	Step CostStep `json:"step,omitempty"`
+}
+
+func (params *GetCostTimeseriesParams) query() (url.Values, error) {
+	query := url.Values{}
+	if params == nil {
+		return query, nil
+	}
+	if err := addQueryValue(query, "window", params.Window); err != nil {
+		return nil, err
+	}
+	if err := addQueryValue(query, "step", params.Step); err != nil {
+		return nil, err
+	}
+	return query, nil
+}
+
 type GetScanResultsParams struct {
 	Limit int64 `json:"limit,omitempty"`
 	Offset int64 `json:"offset,omitempty"`
@@ -204,6 +192,8 @@ type HintCacheWarmParams struct {
 	Turbopuffer bool `json:"turbopuffer,omitempty"`
 	Documents bool `json:"documents,omitempty"`
 	Snapshots bool `json:"snapshots,omitempty"`
+	Blobs bool `json:"blobs,omitempty"`
+	BlobBudgetBytes int64 `json:"blob_budget_bytes,omitempty"`
 	PageSize int64 `json:"page_size,omitempty"`
 }
 
@@ -221,7 +211,32 @@ func (params *HintCacheWarmParams) query() (url.Values, error) {
 	if err := addQueryValue(query, "snapshots", params.Snapshots); err != nil {
 		return nil, err
 	}
+	if err := addQueryValue(query, "blobs", params.Blobs); err != nil {
+		return nil, err
+	}
+	if err := addQueryValue(query, "blob_budget_bytes", params.BlobBudgetBytes); err != nil {
+		return nil, err
+	}
 	if err := addQueryValue(query, "page_size", params.PageSize); err != nil {
+		return nil, err
+	}
+	return query, nil
+}
+
+type ListCheckpointsParams struct {
+	Limit int64 `json:"limit,omitempty"`
+	Before string `json:"before,omitempty"`
+}
+
+func (params *ListCheckpointsParams) query() (url.Values, error) {
+	query := url.Values{}
+	if params == nil {
+		return query, nil
+	}
+	if err := addQueryValue(query, "limit", params.Limit); err != nil {
+		return nil, err
+	}
+	if err := addQueryValue(query, "before", params.Before); err != nil {
 		return nil, err
 	}
 	return query, nil
@@ -257,6 +272,21 @@ func (params *ListClickstreamParams) query() (url.Values, error) {
 		return nil, err
 	}
 	if err := addQueryValue(query, "limit", params.Limit); err != nil {
+		return nil, err
+	}
+	return query, nil
+}
+
+type ListKeysParams struct {
+	IncludeRevoked bool `json:"includeRevoked,omitempty"`
+}
+
+func (params *ListKeysParams) query() (url.Values, error) {
+	query := url.Values{}
+	if params == nil {
+		return query, nil
+	}
+	if err := addQueryValue(query, "includeRevoked", params.IncludeRevoked); err != nil {
 		return nil, err
 	}
 	return query, nil
@@ -400,6 +430,21 @@ func (params *ListTurbopufferNamespacesParams) query() (url.Values, error) {
 	return query, nil
 }
 
+type PutBlobParams struct {
+	Warm bool `json:"warm,omitempty"`
+}
+
+func (params *PutBlobParams) query() (url.Values, error) {
+	query := url.Values{}
+	if params == nil {
+		return query, nil
+	}
+	if err := addQueryValue(query, "warm", params.Warm); err != nil {
+		return nil, err
+	}
+	return query, nil
+}
+
 type QueryMetricsParams struct {
 	Query string `json:"query,omitempty"`
 	Time string `json:"time,omitempty"`
@@ -523,13 +568,57 @@ func (params *WarmCacheParams) query() (url.Values, error) {
 	return query, nil
 }
 
+func (client *Client) AuthenticateKey(ctx context.Context, body *AuthenticateKeyRequest, options ...RequestOption) (*AuthenticateKeyResponse, error) {
+	out := AuthenticateKeyResponse{}
+	if _, err := client.request(ctx, "POST", "/v2/keys/authenticate", url.Values{}, body, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) AuthenticateKeyWithPerf(ctx context.Context, body *AuthenticateKeyRequest, options ...RequestOption) (*LayerResponse[AuthenticateKeyResponse], error) {
+	out := AuthenticateKeyResponse{}
+	perf, err := client.request(ctx, "POST", "/v2/keys/authenticate", url.Values{}, body, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[AuthenticateKeyResponse]{Data: out, Perf: *perf}, nil
+}
+
+
+func (client *Client) BatchQueryNamespace(ctx context.Context, namespace string, body *BatchQueryRequest, options ...RequestOption) (*BatchQueryResponse, error) {
+	out := BatchQueryResponse{}
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/query", url.PathEscape(namespace)), func() url.Values {
+		query := url.Values{}
+		query.Set("stainless_overload", "multiQuery")
+		return query
+	}(), body, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) BatchQueryNamespaceWithPerf(ctx context.Context, namespace string, body *BatchQueryRequest, options ...RequestOption) (*LayerResponse[BatchQueryResponse], error) {
+	out := BatchQueryResponse{}
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/query", url.PathEscape(namespace)), func() url.Values {
+		query := url.Values{}
+		query.Set("stainless_overload", "multiQuery")
+		return query
+	}(), body, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[BatchQueryResponse]{Data: out, Perf: *perf}, nil
+}
+
+
 func (client *Client) BranchNamespace(ctx context.Context, namespace string, body *TurbopufferBranchFromRequest, options ...RequestOption) (*TurbopufferWriteResponse, error) {
 	out := TurbopufferWriteResponse{}
 	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s", url.PathEscape(namespace)), func() url.Values {
 		query := url.Values{}
 		query.Set("stainless_overload", "branchFrom")
 		return query
-	}(), body, &out, &turbopufferFallback{method: "POST", path: fmt.Sprintf("/v2/namespaces/%s", url.PathEscape(namespace))}, options...); err != nil {
+	}(), body, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -541,7 +630,7 @@ func (client *Client) BranchNamespaceWithPerf(ctx context.Context, namespace str
 		query := url.Values{}
 		query.Set("stainless_overload", "branchFrom")
 		return query
-	}(), body, &out, &turbopufferFallback{method: "POST", path: fmt.Sprintf("/v2/namespaces/%s", url.PathEscape(namespace))}, options...)
+	}(), body, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -551,7 +640,7 @@ func (client *Client) BranchNamespaceWithPerf(ctx context.Context, namespace str
 
 func (client *Client) ClaimDocuments(ctx context.Context, pipelineID string, body *ClaimDocumentsRequest, options ...RequestOption) (*ClaimDocumentsResponse, error) {
 	out := ClaimDocumentsResponse{}
-	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/pipelines/%s/claim", url.PathEscape(pipelineID)), url.Values{}, body, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/pipelines/%s/claim", url.PathEscape(pipelineID)), url.Values{}, body, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -559,7 +648,7 @@ func (client *Client) ClaimDocuments(ctx context.Context, pipelineID string, bod
 
 func (client *Client) ClaimDocumentsWithPerf(ctx context.Context, pipelineID string, body *ClaimDocumentsRequest, options ...RequestOption) (*LayerResponse[ClaimDocumentsResponse], error) {
 	out := ClaimDocumentsResponse{}
-	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/pipelines/%s/claim", url.PathEscape(pipelineID)), url.Values{}, body, &out, nil, options...)
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/pipelines/%s/claim", url.PathEscape(pipelineID)), url.Values{}, body, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -569,7 +658,7 @@ func (client *Client) ClaimDocumentsWithPerf(ctx context.Context, pipelineID str
 
 func (client *Client) ClaimUdfItems(ctx context.Context, udfID string, body *UdfClaimRequest, options ...RequestOption) (*UdfClaimResponse, error) {
 	out := UdfClaimResponse{}
-	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/claim", url.PathEscape(udfID)), url.Values{}, body, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/claim", url.PathEscape(udfID)), url.Values{}, body, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -577,7 +666,7 @@ func (client *Client) ClaimUdfItems(ctx context.Context, udfID string, body *Udf
 
 func (client *Client) ClaimUdfItemsWithPerf(ctx context.Context, udfID string, body *UdfClaimRequest, options ...RequestOption) (*LayerResponse[UdfClaimResponse], error) {
 	out := UdfClaimResponse{}
-	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/claim", url.PathEscape(udfID)), url.Values{}, body, &out, nil, options...)
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/claim", url.PathEscape(udfID)), url.Values{}, body, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -587,7 +676,7 @@ func (client *Client) ClaimUdfItemsWithPerf(ctx context.Context, udfID string, b
 
 func (client *Client) CompleteUdfItems(ctx context.Context, udfID string, body *UdfCompleteRequest, options ...RequestOption) (*UdfItemsResponse, error) {
 	out := UdfItemsResponse{}
-	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/items/complete", url.PathEscape(udfID)), url.Values{}, body, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/items/complete", url.PathEscape(udfID)), url.Values{}, body, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -595,7 +684,7 @@ func (client *Client) CompleteUdfItems(ctx context.Context, udfID string, body *
 
 func (client *Client) CompleteUdfItemsWithPerf(ctx context.Context, udfID string, body *UdfCompleteRequest, options ...RequestOption) (*LayerResponse[UdfItemsResponse], error) {
 	out := UdfItemsResponse{}
-	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/items/complete", url.PathEscape(udfID)), url.Values{}, body, &out, nil, options...)
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/items/complete", url.PathEscape(udfID)), url.Values{}, body, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -609,7 +698,7 @@ func (client *Client) CopyNamespace(ctx context.Context, namespace string, body 
 		query := url.Values{}
 		query.Set("stainless_overload", "copyFrom")
 		return query
-	}(), body, &out, &turbopufferFallback{method: "POST", path: fmt.Sprintf("/v2/namespaces/%s", url.PathEscape(namespace))}, options...); err != nil {
+	}(), body, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -621,7 +710,7 @@ func (client *Client) CopyNamespaceWithPerf(ctx context.Context, namespace strin
 		query := url.Values{}
 		query.Set("stainless_overload", "copyFrom")
 		return query
-	}(), body, &out, &turbopufferFallback{method: "POST", path: fmt.Sprintf("/v2/namespaces/%s", url.PathEscape(namespace))}, options...)
+	}(), body, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -629,9 +718,27 @@ func (client *Client) CopyNamespaceWithPerf(ctx context.Context, namespace strin
 }
 
 
+func (client *Client) CreateCheckpoint(ctx context.Context, namespace string, body *CreateCheckpointRequest, options ...RequestOption) (*Checkpoint, error) {
+	out := Checkpoint{}
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/checkpoints", url.PathEscape(namespace)), url.Values{}, body, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) CreateCheckpointWithPerf(ctx context.Context, namespace string, body *CreateCheckpointRequest, options ...RequestOption) (*LayerResponse[Checkpoint], error) {
+	out := Checkpoint{}
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/checkpoints", url.PathEscape(namespace)), url.Values{}, body, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[Checkpoint]{Data: out, Perf: *perf}, nil
+}
+
+
 func (client *Client) CreatePipeline(ctx context.Context, body *CreatePipelineRequest, options ...RequestOption) (*Pipeline, error) {
 	out := Pipeline{}
-	if _, err := client.request(ctx, "POST", "/v2/pipelines", url.Values{}, body, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "POST", "/v2/pipelines", url.Values{}, body, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -639,7 +746,7 @@ func (client *Client) CreatePipeline(ctx context.Context, body *CreatePipelineRe
 
 func (client *Client) CreatePipelineWithPerf(ctx context.Context, body *CreatePipelineRequest, options ...RequestOption) (*LayerResponse[Pipeline], error) {
 	out := Pipeline{}
-	perf, err := client.request(ctx, "POST", "/v2/pipelines", url.Values{}, body, &out, nil, options...)
+	perf, err := client.request(ctx, "POST", "/v2/pipelines", url.Values{}, body, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -649,7 +756,7 @@ func (client *Client) CreatePipelineWithPerf(ctx context.Context, body *CreatePi
 
 func (client *Client) CreateScan(ctx context.Context, namespace string, body *CreateScanRequest, options ...RequestOption) (interface{}, error) {
 	var out interface{}
-	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/scans", url.PathEscape(namespace)), url.Values{}, body, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/scans", url.PathEscape(namespace)), url.Values{}, body, &out, options...); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -657,7 +764,7 @@ func (client *Client) CreateScan(ctx context.Context, namespace string, body *Cr
 
 func (client *Client) CreateScanWithPerf(ctx context.Context, namespace string, body *CreateScanRequest, options ...RequestOption) (*LayerResponse[interface{}], error) {
 	var out interface{}
-	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/scans", url.PathEscape(namespace)), url.Values{}, body, &out, nil, options...)
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/scans", url.PathEscape(namespace)), url.Values{}, body, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -667,7 +774,7 @@ func (client *Client) CreateScanWithPerf(ctx context.Context, namespace string, 
 
 func (client *Client) CreateSnapshot(ctx context.Context, namespace string, body *CreateSnapshotRequest, options ...RequestOption) (*SnapshotJob, error) {
 	out := SnapshotJob{}
-	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/snapshots", url.PathEscape(namespace)), url.Values{}, body, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/snapshots", url.PathEscape(namespace)), url.Values{}, body, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -675,7 +782,7 @@ func (client *Client) CreateSnapshot(ctx context.Context, namespace string, body
 
 func (client *Client) CreateSnapshotWithPerf(ctx context.Context, namespace string, body *CreateSnapshotRequest, options ...RequestOption) (*LayerResponse[SnapshotJob], error) {
 	out := SnapshotJob{}
-	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/snapshots", url.PathEscape(namespace)), url.Values{}, body, &out, nil, options...)
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/snapshots", url.PathEscape(namespace)), url.Values{}, body, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -685,7 +792,7 @@ func (client *Client) CreateSnapshotWithPerf(ctx context.Context, namespace stri
 
 func (client *Client) CreateUdf(ctx context.Context, body *CreateUdfRequest, options ...RequestOption) (*Udf, error) {
 	out := Udf{}
-	if _, err := client.request(ctx, "POST", "/v2/udfs", url.Values{}, body, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "POST", "/v2/udfs", url.Values{}, body, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -693,7 +800,7 @@ func (client *Client) CreateUdf(ctx context.Context, body *CreateUdfRequest, opt
 
 func (client *Client) CreateUdfWithPerf(ctx context.Context, body *CreateUdfRequest, options ...RequestOption) (*LayerResponse[Udf], error) {
 	out := Udf{}
-	perf, err := client.request(ctx, "POST", "/v2/udfs", url.Values{}, body, &out, nil, options...)
+	perf, err := client.request(ctx, "POST", "/v2/udfs", url.Values{}, body, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -701,9 +808,27 @@ func (client *Client) CreateUdfWithPerf(ctx context.Context, body *CreateUdfRequ
 }
 
 
+func (client *Client) DeleteKey(ctx context.Context, keyID string, options ...RequestOption) (*StatusResponse, error) {
+	out := StatusResponse{}
+	if _, err := client.request(ctx, "DELETE", fmt.Sprintf("/v2/keys/%s", url.PathEscape(keyID)), url.Values{}, nil, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) DeleteKeyWithPerf(ctx context.Context, keyID string, options ...RequestOption) (*LayerResponse[StatusResponse], error) {
+	out := StatusResponse{}
+	perf, err := client.request(ctx, "DELETE", fmt.Sprintf("/v2/keys/%s", url.PathEscape(keyID)), url.Values{}, nil, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[StatusResponse]{Data: out, Perf: *perf}, nil
+}
+
+
 func (client *Client) DeleteNamespace(ctx context.Context, namespace string, options ...RequestOption) (*StatusResponse, error) {
 	out := StatusResponse{}
-	if _, err := client.request(ctx, "DELETE", fmt.Sprintf("/v2/namespaces/%s", url.PathEscape(namespace)), url.Values{}, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "DELETE", fmt.Sprintf("/v2/namespaces/%s", url.PathEscape(namespace)), url.Values{}, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -711,7 +836,7 @@ func (client *Client) DeleteNamespace(ctx context.Context, namespace string, opt
 
 func (client *Client) DeleteNamespaceWithPerf(ctx context.Context, namespace string, options ...RequestOption) (*LayerResponse[StatusResponse], error) {
 	out := StatusResponse{}
-	perf, err := client.request(ctx, "DELETE", fmt.Sprintf("/v2/namespaces/%s", url.PathEscape(namespace)), url.Values{}, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "DELETE", fmt.Sprintf("/v2/namespaces/%s", url.PathEscape(namespace)), url.Values{}, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -721,7 +846,7 @@ func (client *Client) DeleteNamespaceWithPerf(ctx context.Context, namespace str
 
 func (client *Client) DeletePipeline(ctx context.Context, pipelineID string, options ...RequestOption) (*StatusResponse, error) {
 	out := StatusResponse{}
-	if _, err := client.request(ctx, "DELETE", fmt.Sprintf("/v2/pipelines/%s", url.PathEscape(pipelineID)), url.Values{}, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "DELETE", fmt.Sprintf("/v2/pipelines/%s", url.PathEscape(pipelineID)), url.Values{}, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -729,7 +854,7 @@ func (client *Client) DeletePipeline(ctx context.Context, pipelineID string, opt
 
 func (client *Client) DeletePipelineWithPerf(ctx context.Context, pipelineID string, options ...RequestOption) (*LayerResponse[StatusResponse], error) {
 	out := StatusResponse{}
-	perf, err := client.request(ctx, "DELETE", fmt.Sprintf("/v2/pipelines/%s", url.PathEscape(pipelineID)), url.Values{}, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "DELETE", fmt.Sprintf("/v2/pipelines/%s", url.PathEscape(pipelineID)), url.Values{}, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -739,7 +864,7 @@ func (client *Client) DeletePipelineWithPerf(ctx context.Context, pipelineID str
 
 func (client *Client) DeleteScan(ctx context.Context, namespace string, scanID string, options ...RequestOption) (*StatusResponse, error) {
 	out := StatusResponse{}
-	if _, err := client.request(ctx, "DELETE", fmt.Sprintf("/v2/namespaces/%s/scans/%s", url.PathEscape(namespace), url.PathEscape(scanID)), url.Values{}, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "DELETE", fmt.Sprintf("/v2/namespaces/%s/scans/%s", url.PathEscape(namespace), url.PathEscape(scanID)), url.Values{}, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -747,7 +872,7 @@ func (client *Client) DeleteScan(ctx context.Context, namespace string, scanID s
 
 func (client *Client) DeleteScanWithPerf(ctx context.Context, namespace string, scanID string, options ...RequestOption) (*LayerResponse[StatusResponse], error) {
 	out := StatusResponse{}
-	perf, err := client.request(ctx, "DELETE", fmt.Sprintf("/v2/namespaces/%s/scans/%s", url.PathEscape(namespace), url.PathEscape(scanID)), url.Values{}, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "DELETE", fmt.Sprintf("/v2/namespaces/%s/scans/%s", url.PathEscape(namespace), url.PathEscape(scanID)), url.Values{}, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -757,7 +882,7 @@ func (client *Client) DeleteScanWithPerf(ctx context.Context, namespace string, 
 
 func (client *Client) DeleteUdf(ctx context.Context, udfID string, options ...RequestOption) (*StatusResponse, error) {
 	out := StatusResponse{}
-	if _, err := client.request(ctx, "DELETE", fmt.Sprintf("/v2/udfs/%s", url.PathEscape(udfID)), url.Values{}, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "DELETE", fmt.Sprintf("/v2/udfs/%s", url.PathEscape(udfID)), url.Values{}, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -765,7 +890,7 @@ func (client *Client) DeleteUdf(ctx context.Context, udfID string, options ...Re
 
 func (client *Client) DeleteUdfWithPerf(ctx context.Context, udfID string, options ...RequestOption) (*LayerResponse[StatusResponse], error) {
 	out := StatusResponse{}
-	perf, err := client.request(ctx, "DELETE", fmt.Sprintf("/v2/udfs/%s", url.PathEscape(udfID)), url.Values{}, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "DELETE", fmt.Sprintf("/v2/udfs/%s", url.PathEscape(udfID)), url.Values{}, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -775,7 +900,7 @@ func (client *Client) DeleteUdfWithPerf(ctx context.Context, udfID string, optio
 
 func (client *Client) DiscoverUdf(ctx context.Context, udfID string, body *UdfDiscoverRequest, options ...RequestOption) (*UdfDiscoverResponse, error) {
 	out := UdfDiscoverResponse{}
-	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/discover", url.PathEscape(udfID)), url.Values{}, body, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/discover", url.PathEscape(udfID)), url.Values{}, body, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -783,7 +908,7 @@ func (client *Client) DiscoverUdf(ctx context.Context, udfID string, body *UdfDi
 
 func (client *Client) DiscoverUdfWithPerf(ctx context.Context, udfID string, body *UdfDiscoverRequest, options ...RequestOption) (*LayerResponse[UdfDiscoverResponse], error) {
 	out := UdfDiscoverResponse{}
-	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/discover", url.PathEscape(udfID)), url.Values{}, body, &out, nil, options...)
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/discover", url.PathEscape(udfID)), url.Values{}, body, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -793,7 +918,7 @@ func (client *Client) DiscoverUdfWithPerf(ctx context.Context, udfID string, bod
 
 func (client *Client) EvaluateTurbopufferRecall(ctx context.Context, namespace string, body *TurbopufferRecallRequest, options ...RequestOption) (*TurbopufferRecallResponse, error) {
 	out := TurbopufferRecallResponse{}
-	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v1/namespaces/%s/_debug/recall", url.PathEscape(namespace)), url.Values{}, body, &out, &turbopufferFallback{method: "POST", path: fmt.Sprintf("/v1/namespaces/%s/_debug/recall", url.PathEscape(namespace))}, options...); err != nil {
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v1/namespaces/%s/_debug/recall", url.PathEscape(namespace)), url.Values{}, body, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -801,7 +926,7 @@ func (client *Client) EvaluateTurbopufferRecall(ctx context.Context, namespace s
 
 func (client *Client) EvaluateTurbopufferRecallWithPerf(ctx context.Context, namespace string, body *TurbopufferRecallRequest, options ...RequestOption) (*LayerResponse[TurbopufferRecallResponse], error) {
 	out := TurbopufferRecallResponse{}
-	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v1/namespaces/%s/_debug/recall", url.PathEscape(namespace)), url.Values{}, body, &out, &turbopufferFallback{method: "POST", path: fmt.Sprintf("/v1/namespaces/%s/_debug/recall", url.PathEscape(namespace))}, options...)
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v1/namespaces/%s/_debug/recall", url.PathEscape(namespace)), url.Values{}, body, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -811,7 +936,7 @@ func (client *Client) EvaluateTurbopufferRecallWithPerf(ctx context.Context, nam
 
 func (client *Client) ExplainTurbopufferQuery(ctx context.Context, namespace string, body TurbopufferQueryRequest, options ...RequestOption) (*TurbopufferExplainQueryResponse, error) {
 	out := TurbopufferExplainQueryResponse{}
-	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/explain_query", url.PathEscape(namespace)), url.Values{}, body, &out, &turbopufferFallback{method: "POST", path: fmt.Sprintf("/v2/namespaces/%s/explain_query", url.PathEscape(namespace))}, options...); err != nil {
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/explain_query", url.PathEscape(namespace)), url.Values{}, body, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -819,7 +944,7 @@ func (client *Client) ExplainTurbopufferQuery(ctx context.Context, namespace str
 
 func (client *Client) ExplainTurbopufferQueryWithPerf(ctx context.Context, namespace string, body TurbopufferQueryRequest, options ...RequestOption) (*LayerResponse[TurbopufferExplainQueryResponse], error) {
 	out := TurbopufferExplainQueryResponse{}
-	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/explain_query", url.PathEscape(namespace)), url.Values{}, body, &out, &turbopufferFallback{method: "POST", path: fmt.Sprintf("/v2/namespaces/%s/explain_query", url.PathEscape(namespace))}, options...)
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/explain_query", url.PathEscape(namespace)), url.Values{}, body, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -829,7 +954,7 @@ func (client *Client) ExplainTurbopufferQueryWithPerf(ctx context.Context, names
 
 func (client *Client) FailUdfItems(ctx context.Context, udfID string, body *UdfFailRequest, options ...RequestOption) (*UdfItemsResponse, error) {
 	out := UdfItemsResponse{}
-	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/items/fail", url.PathEscape(udfID)), url.Values{}, body, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/items/fail", url.PathEscape(udfID)), url.Values{}, body, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -837,7 +962,7 @@ func (client *Client) FailUdfItems(ctx context.Context, udfID string, body *UdfF
 
 func (client *Client) FailUdfItemsWithPerf(ctx context.Context, udfID string, body *UdfFailRequest, options ...RequestOption) (*LayerResponse[UdfItemsResponse], error) {
 	out := UdfItemsResponse{}
-	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/items/fail", url.PathEscape(udfID)), url.Values{}, body, &out, nil, options...)
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/items/fail", url.PathEscape(udfID)), url.Values{}, body, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -851,7 +976,7 @@ func (client *Client) FetchDocument(ctx context.Context, namespace string, docID
 		return nil, err
 	}
 	out := Document{}
-	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/documents/%s", url.PathEscape(namespace), url.PathEscape(docID)), query, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/documents/%s", url.PathEscape(namespace), url.PathEscape(docID)), query, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -863,7 +988,7 @@ func (client *Client) FetchDocumentWithPerf(ctx context.Context, namespace strin
 		return nil, err
 	}
 	out := Document{}
-	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/documents/%s", url.PathEscape(namespace), url.PathEscape(docID)), query, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/documents/%s", url.PathEscape(namespace), url.PathEscape(docID)), query, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -873,7 +998,7 @@ func (client *Client) FetchDocumentWithPerf(ctx context.Context, namespace strin
 
 func (client *Client) FetchDocuments(ctx context.Context, namespace string, body *FetchDocumentsRequest, options ...RequestOption) (*FetchDocumentsResponse, error) {
 	out := FetchDocumentsResponse{}
-	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/documents", url.PathEscape(namespace)), url.Values{}, body, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/documents", url.PathEscape(namespace)), url.Values{}, body, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -881,7 +1006,7 @@ func (client *Client) FetchDocuments(ctx context.Context, namespace string, body
 
 func (client *Client) FetchDocumentsWithPerf(ctx context.Context, namespace string, body *FetchDocumentsRequest, options ...RequestOption) (*LayerResponse[FetchDocumentsResponse], error) {
 	out := FetchDocumentsResponse{}
-	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/documents", url.PathEscape(namespace)), url.Values{}, body, &out, nil, options...)
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/documents", url.PathEscape(namespace)), url.Values{}, body, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -889,9 +1014,151 @@ func (client *Client) FetchDocumentsWithPerf(ctx context.Context, namespace stri
 }
 
 
+func (client *Client) GetBlob(ctx context.Context, namespace string, sha256 string, options ...RequestOption) ([]byte, error) {
+	out := []byte{}
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v1/namespaces/%s/blobs/%s", url.PathEscape(namespace), url.PathEscape(sha256)), url.Values{}, nil, &out, options...); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (client *Client) GetBlobWithPerf(ctx context.Context, namespace string, sha256 string, options ...RequestOption) (*LayerResponse[[]byte], error) {
+	out := []byte{}
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v1/namespaces/%s/blobs/%s", url.PathEscape(namespace), url.PathEscape(sha256)), url.Values{}, nil, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[[]byte]{Data: out, Perf: *perf}, nil
+}
+
+
+func (client *Client) GetCheckpoint(ctx context.Context, namespace string, label string, options ...RequestOption) (*Checkpoint, error) {
+	out := Checkpoint{}
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/checkpoints/%s", url.PathEscape(namespace), url.PathEscape(label)), url.Values{}, nil, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) GetCheckpointWithPerf(ctx context.Context, namespace string, label string, options ...RequestOption) (*LayerResponse[Checkpoint], error) {
+	out := Checkpoint{}
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/checkpoints/%s", url.PathEscape(namespace), url.PathEscape(label)), url.Values{}, nil, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[Checkpoint]{Data: out, Perf: *perf}, nil
+}
+
+
+func (client *Client) GetCostRateCard(ctx context.Context, options ...RequestOption) (*RateCard, error) {
+	out := RateCard{}
+	if _, err := client.request(ctx, "GET", "/v2/cost/rate-card", url.Values{}, nil, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) GetCostRateCardWithPerf(ctx context.Context, options ...RequestOption) (*LayerResponse[RateCard], error) {
+	out := RateCard{}
+	perf, err := client.request(ctx, "GET", "/v2/cost/rate-card", url.Values{}, nil, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[RateCard]{Data: out, Perf: *perf}, nil
+}
+
+
+func (client *Client) GetCostSnapshot(ctx context.Context, params *GetCostSnapshotParams, options ...RequestOption) (*CostSnapshot, error) {
+	query, err := params.query()
+	if err != nil {
+		return nil, err
+	}
+	out := CostSnapshot{}
+	if _, err := client.request(ctx, "GET", "/v2/cost", query, nil, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) GetCostSnapshotWithPerf(ctx context.Context, params *GetCostSnapshotParams, options ...RequestOption) (*LayerResponse[CostSnapshot], error) {
+	query, err := params.query()
+	if err != nil {
+		return nil, err
+	}
+	out := CostSnapshot{}
+	perf, err := client.request(ctx, "GET", "/v2/cost", query, nil, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[CostSnapshot]{Data: out, Perf: *perf}, nil
+}
+
+
+func (client *Client) GetCostTimeseries(ctx context.Context, params *GetCostTimeseriesParams, options ...RequestOption) (*CostTimeseries, error) {
+	query, err := params.query()
+	if err != nil {
+		return nil, err
+	}
+	out := CostTimeseries{}
+	if _, err := client.request(ctx, "GET", "/v2/cost/timeseries", query, nil, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) GetCostTimeseriesWithPerf(ctx context.Context, params *GetCostTimeseriesParams, options ...RequestOption) (*LayerResponse[CostTimeseries], error) {
+	query, err := params.query()
+	if err != nil {
+		return nil, err
+	}
+	out := CostTimeseries{}
+	perf, err := client.request(ctx, "GET", "/v2/cost/timeseries", query, nil, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[CostTimeseries]{Data: out, Perf: *perf}, nil
+}
+
+
+func (client *Client) GetKey(ctx context.Context, keyID string, options ...RequestOption) (*ApiKey, error) {
+	out := ApiKey{}
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/keys/%s", url.PathEscape(keyID)), url.Values{}, nil, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) GetKeyWithPerf(ctx context.Context, keyID string, options ...RequestOption) (*LayerResponse[ApiKey], error) {
+	out := ApiKey{}
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/keys/%s", url.PathEscape(keyID)), url.Values{}, nil, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[ApiKey]{Data: out, Perf: *perf}, nil
+}
+
+
+func (client *Client) GetLicense(ctx context.Context, options ...RequestOption) (*LicenseState, error) {
+	out := LicenseState{}
+	if _, err := client.request(ctx, "GET", "/v2/license", url.Values{}, nil, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) GetLicenseWithPerf(ctx context.Context, options ...RequestOption) (*LayerResponse[LicenseState], error) {
+	out := LicenseState{}
+	perf, err := client.request(ctx, "GET", "/v2/license", url.Values{}, nil, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[LicenseState]{Data: out, Perf: *perf}, nil
+}
+
+
 func (client *Client) GetMetricCatalogEntry(ctx context.Context, name string, options ...RequestOption) (*MetricCatalogEntry, error) {
 	out := MetricCatalogEntry{}
-	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/metrics/catalog/%s", url.PathEscape(name)), url.Values{}, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/metrics/catalog/%s", url.PathEscape(name)), url.Values{}, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -899,7 +1166,7 @@ func (client *Client) GetMetricCatalogEntry(ctx context.Context, name string, op
 
 func (client *Client) GetMetricCatalogEntryWithPerf(ctx context.Context, name string, options ...RequestOption) (*LayerResponse[MetricCatalogEntry], error) {
 	out := MetricCatalogEntry{}
-	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/metrics/catalog/%s", url.PathEscape(name)), url.Values{}, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/metrics/catalog/%s", url.PathEscape(name)), url.Values{}, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -909,7 +1176,7 @@ func (client *Client) GetMetricCatalogEntryWithPerf(ctx context.Context, name st
 
 func (client *Client) GetNamespaceMetadata(ctx context.Context, namespace string, options ...RequestOption) (*NamespaceMetadata, error) {
 	out := NamespaceMetadata{}
-	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/metadata", url.PathEscape(namespace)), url.Values{}, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/metadata", url.PathEscape(namespace)), url.Values{}, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -917,7 +1184,7 @@ func (client *Client) GetNamespaceMetadata(ctx context.Context, namespace string
 
 func (client *Client) GetNamespaceMetadataWithPerf(ctx context.Context, namespace string, options ...RequestOption) (*LayerResponse[NamespaceMetadata], error) {
 	out := NamespaceMetadata{}
-	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/metadata", url.PathEscape(namespace)), url.Values{}, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/metadata", url.PathEscape(namespace)), url.Values{}, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -927,7 +1194,7 @@ func (client *Client) GetNamespaceMetadataWithPerf(ctx context.Context, namespac
 
 func (client *Client) GetNamespaceSnapshot(ctx context.Context, namespace string, sha string, options ...RequestOption) (*SnapshotBody, error) {
 	out := SnapshotBody{}
-	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/snapshots/%s", url.PathEscape(namespace), url.PathEscape(sha)), url.Values{}, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/snapshots/%s", url.PathEscape(namespace), url.PathEscape(sha)), url.Values{}, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -935,7 +1202,7 @@ func (client *Client) GetNamespaceSnapshot(ctx context.Context, namespace string
 
 func (client *Client) GetNamespaceSnapshotWithPerf(ctx context.Context, namespace string, sha string, options ...RequestOption) (*LayerResponse[SnapshotBody], error) {
 	out := SnapshotBody{}
-	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/snapshots/%s", url.PathEscape(namespace), url.PathEscape(sha)), url.Values{}, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/snapshots/%s", url.PathEscape(namespace), url.PathEscape(sha)), url.Values{}, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -945,7 +1212,7 @@ func (client *Client) GetNamespaceSnapshotWithPerf(ctx context.Context, namespac
 
 func (client *Client) GetPipelineDocumentChunks(ctx context.Context, pipelineID string, docID string, options ...RequestOption) (*GetChunksResponse, error) {
 	out := GetChunksResponse{}
-	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/pipelines/%s/documents/%s/chunks", url.PathEscape(pipelineID), url.PathEscape(docID)), url.Values{}, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/pipelines/%s/documents/%s/chunks", url.PathEscape(pipelineID), url.PathEscape(docID)), url.Values{}, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -953,7 +1220,7 @@ func (client *Client) GetPipelineDocumentChunks(ctx context.Context, pipelineID 
 
 func (client *Client) GetPipelineDocumentChunksWithPerf(ctx context.Context, pipelineID string, docID string, options ...RequestOption) (*LayerResponse[GetChunksResponse], error) {
 	out := GetChunksResponse{}
-	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/pipelines/%s/documents/%s/chunks", url.PathEscape(pipelineID), url.PathEscape(docID)), url.Values{}, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/pipelines/%s/documents/%s/chunks", url.PathEscape(pipelineID), url.PathEscape(docID)), url.Values{}, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -963,7 +1230,7 @@ func (client *Client) GetPipelineDocumentChunksWithPerf(ctx context.Context, pip
 
 func (client *Client) GetPipelineStatus(ctx context.Context, pipelineID string, options ...RequestOption) (*PipelineStatus, error) {
 	out := PipelineStatus{}
-	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/pipelines/%s/status", url.PathEscape(pipelineID)), url.Values{}, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/pipelines/%s/status", url.PathEscape(pipelineID)), url.Values{}, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -971,7 +1238,7 @@ func (client *Client) GetPipelineStatus(ctx context.Context, pipelineID string, 
 
 func (client *Client) GetPipelineStatusWithPerf(ctx context.Context, pipelineID string, options ...RequestOption) (*LayerResponse[PipelineStatus], error) {
 	out := PipelineStatus{}
-	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/pipelines/%s/status", url.PathEscape(pipelineID)), url.Values{}, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/pipelines/%s/status", url.PathEscape(pipelineID)), url.Values{}, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -981,7 +1248,7 @@ func (client *Client) GetPipelineStatusWithPerf(ctx context.Context, pipelineID 
 
 func (client *Client) GetScan(ctx context.Context, namespace string, scanID string, options ...RequestOption) (*ScanJob, error) {
 	out := ScanJob{}
-	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/scans/%s", url.PathEscape(namespace), url.PathEscape(scanID)), url.Values{}, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/scans/%s", url.PathEscape(namespace), url.PathEscape(scanID)), url.Values{}, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -989,7 +1256,7 @@ func (client *Client) GetScan(ctx context.Context, namespace string, scanID stri
 
 func (client *Client) GetScanWithPerf(ctx context.Context, namespace string, scanID string, options ...RequestOption) (*LayerResponse[ScanJob], error) {
 	out := ScanJob{}
-	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/scans/%s", url.PathEscape(namespace), url.PathEscape(scanID)), url.Values{}, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/scans/%s", url.PathEscape(namespace), url.PathEscape(scanID)), url.Values{}, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -997,35 +1264,35 @@ func (client *Client) GetScanWithPerf(ctx context.Context, namespace string, sca
 }
 
 
-func (client *Client) GetScanResults(ctx context.Context, namespace string, scanID string, params *GetScanResultsParams, options ...RequestOption) (*ScanIdsResponse, error) {
+func (client *Client) GetScanResults(ctx context.Context, namespace string, scanID string, params *GetScanResultsParams, options ...RequestOption) (interface{}, error) {
 	query, err := params.query()
 	if err != nil {
 		return nil, err
 	}
-	out := ScanIdsResponse{}
-	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/scans/%s/results", url.PathEscape(namespace), url.PathEscape(scanID)), query, nil, &out, nil, options...); err != nil {
+	var out interface{}
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/scans/%s/results", url.PathEscape(namespace), url.PathEscape(scanID)), query, nil, &out, options...); err != nil {
 		return nil, err
 	}
-	return &out, nil
+	return out, nil
 }
 
-func (client *Client) GetScanResultsWithPerf(ctx context.Context, namespace string, scanID string, params *GetScanResultsParams, options ...RequestOption) (*LayerResponse[ScanIdsResponse], error) {
+func (client *Client) GetScanResultsWithPerf(ctx context.Context, namespace string, scanID string, params *GetScanResultsParams, options ...RequestOption) (*LayerResponse[interface{}], error) {
 	query, err := params.query()
 	if err != nil {
 		return nil, err
 	}
-	out := ScanIdsResponse{}
-	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/scans/%s/results", url.PathEscape(namespace), url.PathEscape(scanID)), query, nil, &out, nil, options...)
+	var out interface{}
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/scans/%s/results", url.PathEscape(namespace), url.PathEscape(scanID)), query, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
-	return &LayerResponse[ScanIdsResponse]{Data: out, Perf: *perf}, nil
+	return &LayerResponse[interface{}]{Data: out, Perf: *perf}, nil
 }
 
 
 func (client *Client) GetSnapshotJob(ctx context.Context, namespace string, jobID string, options ...RequestOption) (*SnapshotJob, error) {
 	out := SnapshotJob{}
-	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/snapshot-jobs/%s", url.PathEscape(namespace), url.PathEscape(jobID)), url.Values{}, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/snapshot-jobs/%s", url.PathEscape(namespace), url.PathEscape(jobID)), url.Values{}, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -1033,7 +1300,7 @@ func (client *Client) GetSnapshotJob(ctx context.Context, namespace string, jobI
 
 func (client *Client) GetSnapshotJobWithPerf(ctx context.Context, namespace string, jobID string, options ...RequestOption) (*LayerResponse[SnapshotJob], error) {
 	out := SnapshotJob{}
-	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/snapshot-jobs/%s", url.PathEscape(namespace), url.PathEscape(jobID)), url.Values{}, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/snapshot-jobs/%s", url.PathEscape(namespace), url.PathEscape(jobID)), url.Values{}, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1041,9 +1308,27 @@ func (client *Client) GetSnapshotJobWithPerf(ctx context.Context, namespace stri
 }
 
 
+func (client *Client) GetSnapshotPolicy(ctx context.Context, namespace string, options ...RequestOption) (*SnapshotPolicy, error) {
+	out := SnapshotPolicy{}
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/snapshot-policy", url.PathEscape(namespace)), url.Values{}, nil, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) GetSnapshotPolicyWithPerf(ctx context.Context, namespace string, options ...RequestOption) (*LayerResponse[SnapshotPolicy], error) {
+	out := SnapshotPolicy{}
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/snapshot-policy", url.PathEscape(namespace)), url.Values{}, nil, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[SnapshotPolicy]{Data: out, Perf: *perf}, nil
+}
+
+
 func (client *Client) GetTurbopufferNamespaceSchema(ctx context.Context, namespace string, options ...RequestOption) (TurbopufferSchema, error) {
 	out := TurbopufferSchema{}
-	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v1/namespaces/%s/schema", url.PathEscape(namespace)), url.Values{}, nil, &out, &turbopufferFallback{method: "GET", path: fmt.Sprintf("/v1/namespaces/%s/schema", url.PathEscape(namespace))}, options...); err != nil {
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v1/namespaces/%s/schema", url.PathEscape(namespace)), url.Values{}, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -1051,7 +1336,7 @@ func (client *Client) GetTurbopufferNamespaceSchema(ctx context.Context, namespa
 
 func (client *Client) GetTurbopufferNamespaceSchemaWithPerf(ctx context.Context, namespace string, options ...RequestOption) (*LayerResponse[TurbopufferSchema], error) {
 	out := TurbopufferSchema{}
-	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v1/namespaces/%s/schema", url.PathEscape(namespace)), url.Values{}, nil, &out, &turbopufferFallback{method: "GET", path: fmt.Sprintf("/v1/namespaces/%s/schema", url.PathEscape(namespace))}, options...)
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v1/namespaces/%s/schema", url.PathEscape(namespace)), url.Values{}, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1061,7 +1346,7 @@ func (client *Client) GetTurbopufferNamespaceSchemaWithPerf(ctx context.Context,
 
 func (client *Client) GetTurbopufferV1NamespaceMetadata(ctx context.Context, namespace string, options ...RequestOption) (*NamespaceMetadata, error) {
 	out := NamespaceMetadata{}
-	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v1/namespaces/%s/metadata", url.PathEscape(namespace)), url.Values{}, nil, &out, &turbopufferFallback{method: "GET", path: fmt.Sprintf("/v1/namespaces/%s/metadata", url.PathEscape(namespace))}, options...); err != nil {
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v1/namespaces/%s/metadata", url.PathEscape(namespace)), url.Values{}, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -1069,7 +1354,7 @@ func (client *Client) GetTurbopufferV1NamespaceMetadata(ctx context.Context, nam
 
 func (client *Client) GetTurbopufferV1NamespaceMetadataWithPerf(ctx context.Context, namespace string, options ...RequestOption) (*LayerResponse[NamespaceMetadata], error) {
 	out := NamespaceMetadata{}
-	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v1/namespaces/%s/metadata", url.PathEscape(namespace)), url.Values{}, nil, &out, &turbopufferFallback{method: "GET", path: fmt.Sprintf("/v1/namespaces/%s/metadata", url.PathEscape(namespace))}, options...)
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v1/namespaces/%s/metadata", url.PathEscape(namespace)), url.Values{}, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1079,7 +1364,7 @@ func (client *Client) GetTurbopufferV1NamespaceMetadataWithPerf(ctx context.Cont
 
 func (client *Client) GetUdf(ctx context.Context, udfID string, options ...RequestOption) (*GetUdfResponse, error) {
 	out := GetUdfResponse{}
-	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/udfs/%s", url.PathEscape(udfID)), url.Values{}, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/udfs/%s", url.PathEscape(udfID)), url.Values{}, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -1087,7 +1372,7 @@ func (client *Client) GetUdf(ctx context.Context, udfID string, options ...Reque
 
 func (client *Client) GetUdfWithPerf(ctx context.Context, udfID string, options ...RequestOption) (*LayerResponse[GetUdfResponse], error) {
 	out := GetUdfResponse{}
-	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/udfs/%s", url.PathEscape(udfID)), url.Values{}, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/udfs/%s", url.PathEscape(udfID)), url.Values{}, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1097,7 +1382,7 @@ func (client *Client) GetUdfWithPerf(ctx context.Context, udfID string, options 
 
 func (client *Client) GetUdfStatus(ctx context.Context, udfID string, options ...RequestOption) (*UdfStatus, error) {
 	out := UdfStatus{}
-	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/udfs/%s/status", url.PathEscape(udfID)), url.Values{}, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/udfs/%s/status", url.PathEscape(udfID)), url.Values{}, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -1105,7 +1390,7 @@ func (client *Client) GetUdfStatus(ctx context.Context, udfID string, options ..
 
 func (client *Client) GetUdfStatusWithPerf(ctx context.Context, udfID string, options ...RequestOption) (*LayerResponse[UdfStatus], error) {
 	out := UdfStatus{}
-	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/udfs/%s/status", url.PathEscape(udfID)), url.Values{}, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/udfs/%s/status", url.PathEscape(udfID)), url.Values{}, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1113,9 +1398,45 @@ func (client *Client) GetUdfStatusWithPerf(ctx context.Context, udfID string, op
 }
 
 
+func (client *Client) GetVectorstore(ctx context.Context, name string, options ...RequestOption) (*VectorStore, error) {
+	out := VectorStore{}
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/vectorstores/%s", url.PathEscape(name)), url.Values{}, nil, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) GetVectorstoreWithPerf(ctx context.Context, name string, options ...RequestOption) (*LayerResponse[VectorStore], error) {
+	out := VectorStore{}
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/vectorstores/%s", url.PathEscape(name)), url.Values{}, nil, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[VectorStore]{Data: out, Perf: *perf}, nil
+}
+
+
+func (client *Client) GetWarehouse(ctx context.Context, name string, options ...RequestOption) (*Warehouse, error) {
+	out := Warehouse{}
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/warehouses/%s", url.PathEscape(name)), url.Values{}, nil, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) GetWarehouseWithPerf(ctx context.Context, name string, options ...RequestOption) (*LayerResponse[Warehouse], error) {
+	out := Warehouse{}
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/warehouses/%s", url.PathEscape(name)), url.Values{}, nil, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[Warehouse]{Data: out, Perf: *perf}, nil
+}
+
+
 func (client *Client) GetWarmJob(ctx context.Context, namespace string, jobID string, options ...RequestOption) (*WarmJob, error) {
 	out := WarmJob{}
-	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/warm-jobs/%s", url.PathEscape(namespace), url.PathEscape(jobID)), url.Values{}, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/warm-jobs/%s", url.PathEscape(namespace), url.PathEscape(jobID)), url.Values{}, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -1123,7 +1444,7 @@ func (client *Client) GetWarmJob(ctx context.Context, namespace string, jobID st
 
 func (client *Client) GetWarmJobWithPerf(ctx context.Context, namespace string, jobID string, options ...RequestOption) (*LayerResponse[WarmJob], error) {
 	out := WarmJob{}
-	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/warm-jobs/%s", url.PathEscape(namespace), url.PathEscape(jobID)), url.Values{}, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/warm-jobs/%s", url.PathEscape(namespace), url.PathEscape(jobID)), url.Values{}, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1133,7 +1454,7 @@ func (client *Client) GetWarmJobWithPerf(ctx context.Context, namespace string, 
 
 func (client *Client) HeartbeatDocuments(ctx context.Context, pipelineID string, body *HeartbeatDocumentsRequest, options ...RequestOption) (*DocumentsStageResponse, error) {
 	out := DocumentsStageResponse{}
-	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/pipelines/%s/documents/heartbeat", url.PathEscape(pipelineID)), url.Values{}, body, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/pipelines/%s/documents/heartbeat", url.PathEscape(pipelineID)), url.Values{}, body, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -1141,7 +1462,7 @@ func (client *Client) HeartbeatDocuments(ctx context.Context, pipelineID string,
 
 func (client *Client) HeartbeatDocumentsWithPerf(ctx context.Context, pipelineID string, body *HeartbeatDocumentsRequest, options ...RequestOption) (*LayerResponse[DocumentsStageResponse], error) {
 	out := DocumentsStageResponse{}
-	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/pipelines/%s/documents/heartbeat", url.PathEscape(pipelineID)), url.Values{}, body, &out, nil, options...)
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/pipelines/%s/documents/heartbeat", url.PathEscape(pipelineID)), url.Values{}, body, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1151,7 +1472,7 @@ func (client *Client) HeartbeatDocumentsWithPerf(ctx context.Context, pipelineID
 
 func (client *Client) HeartbeatUdfItems(ctx context.Context, udfID string, body *UdfHeartbeatRequest, options ...RequestOption) (*UdfItemsResponse, error) {
 	out := UdfItemsResponse{}
-	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/items/heartbeat", url.PathEscape(udfID)), url.Values{}, body, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/items/heartbeat", url.PathEscape(udfID)), url.Values{}, body, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -1159,7 +1480,7 @@ func (client *Client) HeartbeatUdfItems(ctx context.Context, udfID string, body 
 
 func (client *Client) HeartbeatUdfItemsWithPerf(ctx context.Context, udfID string, body *UdfHeartbeatRequest, options ...RequestOption) (*LayerResponse[UdfItemsResponse], error) {
 	out := UdfItemsResponse{}
-	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/items/heartbeat", url.PathEscape(udfID)), url.Values{}, body, &out, nil, options...)
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/items/heartbeat", url.PathEscape(udfID)), url.Values{}, body, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1173,7 +1494,7 @@ func (client *Client) HintCacheWarm(ctx context.Context, namespace string, param
 		return nil, err
 	}
 	out := HintCacheWarmResponse{}
-	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v1/namespaces/%s/hint_cache_warm", url.PathEscape(namespace)), query, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v1/namespaces/%s/hint_cache_warm", url.PathEscape(namespace)), query, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -1185,11 +1506,73 @@ func (client *Client) HintCacheWarmWithPerf(ctx context.Context, namespace strin
 		return nil, err
 	}
 	out := HintCacheWarmResponse{}
-	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v1/namespaces/%s/hint_cache_warm", url.PathEscape(namespace)), query, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v1/namespaces/%s/hint_cache_warm", url.PathEscape(namespace)), query, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
 	return &LayerResponse[HintCacheWarmResponse]{Data: out, Perf: *perf}, nil
+}
+
+
+func (client *Client) ImportNamespace(ctx context.Context, namespace string, body []byte, options ...RequestOption) (map[string]interface{}, error) {
+	out := map[string]interface{}{}
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/import", url.PathEscape(namespace)), url.Values{}, rawBody{data: body, contentType: "application/vnd.apache.arrow.stream"}, &out, options...); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (client *Client) ImportNamespaceWithPerf(ctx context.Context, namespace string, body []byte, options ...RequestOption) (*LayerResponse[map[string]interface{}], error) {
+	out := map[string]interface{}{}
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/import", url.PathEscape(namespace)), url.Values{}, rawBody{data: body, contentType: "application/vnd.apache.arrow.stream"}, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[map[string]interface{}]{Data: out, Perf: *perf}, nil
+}
+
+
+func (client *Client) InitNamespace(ctx context.Context, namespace string, body *InitNamespaceRequest, options ...RequestOption) (*InitNamespaceResponse, error) {
+	out := InitNamespaceResponse{}
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/init", url.PathEscape(namespace)), url.Values{}, body, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) InitNamespaceWithPerf(ctx context.Context, namespace string, body *InitNamespaceRequest, options ...RequestOption) (*LayerResponse[InitNamespaceResponse], error) {
+	out := InitNamespaceResponse{}
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/init", url.PathEscape(namespace)), url.Values{}, body, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[InitNamespaceResponse]{Data: out, Perf: *perf}, nil
+}
+
+
+func (client *Client) ListCheckpoints(ctx context.Context, namespace string, params *ListCheckpointsParams, options ...RequestOption) (*CheckpointList, error) {
+	query, err := params.query()
+	if err != nil {
+		return nil, err
+	}
+	out := CheckpointList{}
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/checkpoints", url.PathEscape(namespace)), query, nil, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) ListCheckpointsWithPerf(ctx context.Context, namespace string, params *ListCheckpointsParams, options ...RequestOption) (*LayerResponse[CheckpointList], error) {
+	query, err := params.query()
+	if err != nil {
+		return nil, err
+	}
+	out := CheckpointList{}
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/checkpoints", url.PathEscape(namespace)), query, nil, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[CheckpointList]{Data: out, Perf: *perf}, nil
 }
 
 
@@ -1199,7 +1582,7 @@ func (client *Client) ListClickstream(ctx context.Context, namespace string, par
 		return nil, err
 	}
 	out := ClickstreamListResponse{}
-	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/clickstream", url.PathEscape(namespace)), query, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/clickstream", url.PathEscape(namespace)), query, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -1211,11 +1594,37 @@ func (client *Client) ListClickstreamWithPerf(ctx context.Context, namespace str
 		return nil, err
 	}
 	out := ClickstreamListResponse{}
-	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/clickstream", url.PathEscape(namespace)), query, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/clickstream", url.PathEscape(namespace)), query, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
 	return &LayerResponse[ClickstreamListResponse]{Data: out, Perf: *perf}, nil
+}
+
+
+func (client *Client) ListKeys(ctx context.Context, params *ListKeysParams, options ...RequestOption) (*ApiKeyList, error) {
+	query, err := params.query()
+	if err != nil {
+		return nil, err
+	}
+	out := ApiKeyList{}
+	if _, err := client.request(ctx, "GET", "/v2/keys", query, nil, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) ListKeysWithPerf(ctx context.Context, params *ListKeysParams, options ...RequestOption) (*LayerResponse[ApiKeyList], error) {
+	query, err := params.query()
+	if err != nil {
+		return nil, err
+	}
+	out := ApiKeyList{}
+	perf, err := client.request(ctx, "GET", "/v2/keys", query, nil, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[ApiKeyList]{Data: out, Perf: *perf}, nil
 }
 
 
@@ -1225,7 +1634,7 @@ func (client *Client) ListMetricsCatalog(ctx context.Context, params *ListMetric
 		return nil, err
 	}
 	out := MetricCatalog{}
-	if _, err := client.request(ctx, "GET", "/v2/metrics/catalog", query, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "GET", "/v2/metrics/catalog", query, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -1237,7 +1646,7 @@ func (client *Client) ListMetricsCatalogWithPerf(ctx context.Context, params *Li
 		return nil, err
 	}
 	out := MetricCatalog{}
-	perf, err := client.request(ctx, "GET", "/v2/metrics/catalog", query, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "GET", "/v2/metrics/catalog", query, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1251,7 +1660,7 @@ func (client *Client) ListNamespaceHistory(ctx context.Context, namespace string
 		return nil, err
 	}
 	out := []SnapshotHistoryEntry{}
-	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/history", url.PathEscape(namespace)), query, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/history", url.PathEscape(namespace)), query, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -1263,7 +1672,7 @@ func (client *Client) ListNamespaceHistoryWithPerf(ctx context.Context, namespac
 		return nil, err
 	}
 	out := []SnapshotHistoryEntry{}
-	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/history", url.PathEscape(namespace)), query, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/history", url.PathEscape(namespace)), query, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1277,7 +1686,7 @@ func (client *Client) ListNamespaces(ctx context.Context, params *ListNamespaces
 		return nil, err
 	}
 	out := NamespaceList{}
-	if _, err := client.request(ctx, "GET", "/v2/namespaces", query, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "GET", "/v2/namespaces", query, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -1289,7 +1698,7 @@ func (client *Client) ListNamespacesWithPerf(ctx context.Context, params *ListNa
 		return nil, err
 	}
 	out := NamespaceList{}
-	perf, err := client.request(ctx, "GET", "/v2/namespaces", query, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "GET", "/v2/namespaces", query, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1299,7 +1708,7 @@ func (client *Client) ListNamespacesWithPerf(ctx context.Context, params *ListNa
 
 func (client *Client) ListPipelines(ctx context.Context, options ...RequestOption) (*PipelineList, error) {
 	out := PipelineList{}
-	if _, err := client.request(ctx, "GET", "/v2/pipelines", url.Values{}, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "GET", "/v2/pipelines", url.Values{}, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -1307,7 +1716,7 @@ func (client *Client) ListPipelines(ctx context.Context, options ...RequestOptio
 
 func (client *Client) ListPipelinesWithPerf(ctx context.Context, options ...RequestOption) (*LayerResponse[PipelineList], error) {
 	out := PipelineList{}
-	perf, err := client.request(ctx, "GET", "/v2/pipelines", url.Values{}, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "GET", "/v2/pipelines", url.Values{}, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1317,7 +1726,7 @@ func (client *Client) ListPipelinesWithPerf(ctx context.Context, options ...Requ
 
 func (client *Client) ListScans(ctx context.Context, namespace string, options ...RequestOption) (*ScanJobList, error) {
 	out := ScanJobList{}
-	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/scans", url.PathEscape(namespace)), url.Values{}, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/scans", url.PathEscape(namespace)), url.Values{}, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -1325,7 +1734,7 @@ func (client *Client) ListScans(ctx context.Context, namespace string, options .
 
 func (client *Client) ListScansWithPerf(ctx context.Context, namespace string, options ...RequestOption) (*LayerResponse[ScanJobList], error) {
 	out := ScanJobList{}
-	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/scans", url.PathEscape(namespace)), url.Values{}, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/scans", url.PathEscape(namespace)), url.Values{}, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1339,7 +1748,7 @@ func (client *Client) ListSearchHistory(ctx context.Context, namespace string, p
 		return nil, err
 	}
 	out := SearchHistoryListResponse{}
-	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/search-history", url.PathEscape(namespace)), query, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/search-history", url.PathEscape(namespace)), query, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -1351,7 +1760,7 @@ func (client *Client) ListSearchHistoryWithPerf(ctx context.Context, namespace s
 		return nil, err
 	}
 	out := SearchHistoryListResponse{}
-	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/search-history", url.PathEscape(namespace)), query, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/search-history", url.PathEscape(namespace)), query, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1365,7 +1774,7 @@ func (client *Client) ListSnapshotActivity(ctx context.Context, params *ListSnap
 		return nil, err
 	}
 	out := SnapshotActivityList{}
-	if _, err := client.request(ctx, "GET", "/v2/activity/snapshots", query, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "GET", "/v2/activity/snapshots", query, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -1377,7 +1786,7 @@ func (client *Client) ListSnapshotActivityWithPerf(ctx context.Context, params *
 		return nil, err
 	}
 	out := SnapshotActivityList{}
-	perf, err := client.request(ctx, "GET", "/v2/activity/snapshots", query, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "GET", "/v2/activity/snapshots", query, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1387,7 +1796,7 @@ func (client *Client) ListSnapshotActivityWithPerf(ctx context.Context, params *
 
 func (client *Client) ListSnapshotJobs(ctx context.Context, namespace string, options ...RequestOption) (*SnapshotJobList, error) {
 	out := SnapshotJobList{}
-	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/snapshot-jobs", url.PathEscape(namespace)), url.Values{}, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/snapshot-jobs", url.PathEscape(namespace)), url.Values{}, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -1395,7 +1804,7 @@ func (client *Client) ListSnapshotJobs(ctx context.Context, namespace string, op
 
 func (client *Client) ListSnapshotJobsWithPerf(ctx context.Context, namespace string, options ...RequestOption) (*LayerResponse[SnapshotJobList], error) {
 	out := SnapshotJobList{}
-	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/snapshot-jobs", url.PathEscape(namespace)), url.Values{}, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/snapshot-jobs", url.PathEscape(namespace)), url.Values{}, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1409,7 +1818,7 @@ func (client *Client) ListTurbopufferNamespaces(ctx context.Context, params *Lis
 		return nil, err
 	}
 	out := TurbopufferNamespaceList{}
-	if _, err := client.request(ctx, "GET", "/v1/namespaces", query, nil, &out, &turbopufferFallback{method: "GET", path: "/v1/namespaces"}, options...); err != nil {
+	if _, err := client.request(ctx, "GET", "/v1/namespaces", query, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -1421,7 +1830,7 @@ func (client *Client) ListTurbopufferNamespacesWithPerf(ctx context.Context, par
 		return nil, err
 	}
 	out := TurbopufferNamespaceList{}
-	perf, err := client.request(ctx, "GET", "/v1/namespaces", query, nil, &out, &turbopufferFallback{method: "GET", path: "/v1/namespaces"}, options...)
+	perf, err := client.request(ctx, "GET", "/v1/namespaces", query, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1431,7 +1840,7 @@ func (client *Client) ListTurbopufferNamespacesWithPerf(ctx context.Context, par
 
 func (client *Client) ListUdfs(ctx context.Context, options ...RequestOption) (*UdfList, error) {
 	out := UdfList{}
-	if _, err := client.request(ctx, "GET", "/v2/udfs", url.Values{}, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "GET", "/v2/udfs", url.Values{}, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -1439,7 +1848,7 @@ func (client *Client) ListUdfs(ctx context.Context, options ...RequestOption) (*
 
 func (client *Client) ListUdfsWithPerf(ctx context.Context, options ...RequestOption) (*LayerResponse[UdfList], error) {
 	out := UdfList{}
-	perf, err := client.request(ctx, "GET", "/v2/udfs", url.Values{}, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "GET", "/v2/udfs", url.Values{}, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1447,9 +1856,45 @@ func (client *Client) ListUdfsWithPerf(ctx context.Context, options ...RequestOp
 }
 
 
+func (client *Client) ListVectorstores(ctx context.Context, options ...RequestOption) (*VectorStoreList, error) {
+	out := VectorStoreList{}
+	if _, err := client.request(ctx, "GET", "/v2/vectorstores", url.Values{}, nil, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) ListVectorstoresWithPerf(ctx context.Context, options ...RequestOption) (*LayerResponse[VectorStoreList], error) {
+	out := VectorStoreList{}
+	perf, err := client.request(ctx, "GET", "/v2/vectorstores", url.Values{}, nil, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[VectorStoreList]{Data: out, Perf: *perf}, nil
+}
+
+
+func (client *Client) ListWarehouses(ctx context.Context, options ...RequestOption) (*WarehouseList, error) {
+	out := WarehouseList{}
+	if _, err := client.request(ctx, "GET", "/v2/warehouses", url.Values{}, nil, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) ListWarehousesWithPerf(ctx context.Context, options ...RequestOption) (*LayerResponse[WarehouseList], error) {
+	out := WarehouseList{}
+	perf, err := client.request(ctx, "GET", "/v2/warehouses", url.Values{}, nil, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[WarehouseList]{Data: out, Perf: *perf}, nil
+}
+
+
 func (client *Client) ListWarmJobs(ctx context.Context, namespace string, options ...RequestOption) (*WarmJobList, error) {
 	out := WarmJobList{}
-	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/warm-jobs", url.PathEscape(namespace)), url.Values{}, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/warm-jobs", url.PathEscape(namespace)), url.Values{}, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -1457,7 +1902,7 @@ func (client *Client) ListWarmJobs(ctx context.Context, namespace string, option
 
 func (client *Client) ListWarmJobsWithPerf(ctx context.Context, namespace string, options ...RequestOption) (*LayerResponse[WarmJobList], error) {
 	out := WarmJobList{}
-	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/warm-jobs", url.PathEscape(namespace)), url.Values{}, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/warm-jobs", url.PathEscape(namespace)), url.Values{}, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1465,35 +1910,27 @@ func (client *Client) ListWarmJobsWithPerf(ctx context.Context, namespace string
 }
 
 
-func (client *Client) MultiQueryTurbopufferNamespace(ctx context.Context, namespace string, body *TurbopufferMultiQueryRequest, options ...RequestOption) (*TurbopufferMultiQueryResponse, error) {
-	out := TurbopufferMultiQueryResponse{}
-	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/query", url.PathEscape(namespace)), func() url.Values {
-		query := url.Values{}
-		query.Set("stainless_overload", "multiQuery")
-		return query
-	}(), body, &out, &turbopufferFallback{method: "POST", path: fmt.Sprintf("/v2/namespaces/%s/query", url.PathEscape(namespace))}, options...); err != nil {
+func (client *Client) MintKey(ctx context.Context, body *MintKeyRequest, options ...RequestOption) (*MintKeyResponse, error) {
+	out := MintKeyResponse{}
+	if _, err := client.request(ctx, "POST", "/v2/keys", url.Values{}, body, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
-func (client *Client) MultiQueryTurbopufferNamespaceWithPerf(ctx context.Context, namespace string, body *TurbopufferMultiQueryRequest, options ...RequestOption) (*LayerResponse[TurbopufferMultiQueryResponse], error) {
-	out := TurbopufferMultiQueryResponse{}
-	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/query", url.PathEscape(namespace)), func() url.Values {
-		query := url.Values{}
-		query.Set("stainless_overload", "multiQuery")
-		return query
-	}(), body, &out, &turbopufferFallback{method: "POST", path: fmt.Sprintf("/v2/namespaces/%s/query", url.PathEscape(namespace))}, options...)
+func (client *Client) MintKeyWithPerf(ctx context.Context, body *MintKeyRequest, options ...RequestOption) (*LayerResponse[MintKeyResponse], error) {
+	out := MintKeyResponse{}
+	perf, err := client.request(ctx, "POST", "/v2/keys", url.Values{}, body, &out, options...)
 	if err != nil {
 		return nil, err
 	}
-	return &LayerResponse[TurbopufferMultiQueryResponse]{Data: out, Perf: *perf}, nil
+	return &LayerResponse[MintKeyResponse]{Data: out, Perf: *perf}, nil
 }
 
 
 func (client *Client) PauseUdf(ctx context.Context, udfID string, options ...RequestOption) (*Udf, error) {
 	out := Udf{}
-	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/pause", url.PathEscape(udfID)), url.Values{}, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/pause", url.PathEscape(udfID)), url.Values{}, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -1501,7 +1938,7 @@ func (client *Client) PauseUdf(ctx context.Context, udfID string, options ...Req
 
 func (client *Client) PauseUdfWithPerf(ctx context.Context, udfID string, options ...RequestOption) (*LayerResponse[Udf], error) {
 	out := Udf{}
-	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/pause", url.PathEscape(udfID)), url.Values{}, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/pause", url.PathEscape(udfID)), url.Values{}, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1509,9 +1946,35 @@ func (client *Client) PauseUdfWithPerf(ctx context.Context, udfID string, option
 }
 
 
+func (client *Client) PutBlob(ctx context.Context, namespace string, body []byte, params *PutBlobParams, options ...RequestOption) (*BlobPutResponse, error) {
+	query, err := params.query()
+	if err != nil {
+		return nil, err
+	}
+	out := BlobPutResponse{}
+	if _, err := client.request(ctx, "PUT", fmt.Sprintf("/v1/namespaces/%s/blobs", url.PathEscape(namespace)), query, rawBody{data: body, contentType: "application/octet-stream"}, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) PutBlobWithPerf(ctx context.Context, namespace string, body []byte, params *PutBlobParams, options ...RequestOption) (*LayerResponse[BlobPutResponse], error) {
+	query, err := params.query()
+	if err != nil {
+		return nil, err
+	}
+	out := BlobPutResponse{}
+	perf, err := client.request(ctx, "PUT", fmt.Sprintf("/v1/namespaces/%s/blobs", url.PathEscape(namespace)), query, rawBody{data: body, contentType: "application/octet-stream"}, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[BlobPutResponse]{Data: out, Perf: *perf}, nil
+}
+
+
 func (client *Client) PutPipelineDocumentChunks(ctx context.Context, pipelineID string, docID string, body *PutChunksRequest, options ...RequestOption) (*StageDocumentResponse, error) {
 	out := StageDocumentResponse{}
-	if _, err := client.request(ctx, "PUT", fmt.Sprintf("/v2/pipelines/%s/documents/%s", url.PathEscape(pipelineID), url.PathEscape(docID)), url.Values{}, body, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "PUT", fmt.Sprintf("/v2/pipelines/%s/documents/%s", url.PathEscape(pipelineID), url.PathEscape(docID)), url.Values{}, body, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -1519,7 +1982,7 @@ func (client *Client) PutPipelineDocumentChunks(ctx context.Context, pipelineID 
 
 func (client *Client) PutPipelineDocumentChunksWithPerf(ctx context.Context, pipelineID string, docID string, body *PutChunksRequest, options ...RequestOption) (*LayerResponse[StageDocumentResponse], error) {
 	out := StageDocumentResponse{}
-	perf, err := client.request(ctx, "PUT", fmt.Sprintf("/v2/pipelines/%s/documents/%s", url.PathEscape(pipelineID), url.PathEscape(docID)), url.Values{}, body, &out, nil, options...)
+	perf, err := client.request(ctx, "PUT", fmt.Sprintf("/v2/pipelines/%s/documents/%s", url.PathEscape(pipelineID), url.PathEscape(docID)), url.Values{}, body, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1529,7 +1992,7 @@ func (client *Client) PutPipelineDocumentChunksWithPerf(ctx context.Context, pip
 
 func (client *Client) PutPipelineDocumentVectors(ctx context.Context, pipelineID string, docID string, body *PutVectorsRequest, options ...RequestOption) (*StatusResponse, error) {
 	out := StatusResponse{}
-	if _, err := client.request(ctx, "PUT", fmt.Sprintf("/v2/pipelines/%s/documents/%s/vectors", url.PathEscape(pipelineID), url.PathEscape(docID)), url.Values{}, body, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "PUT", fmt.Sprintf("/v2/pipelines/%s/documents/%s/vectors", url.PathEscape(pipelineID), url.PathEscape(docID)), url.Values{}, body, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -1537,11 +2000,65 @@ func (client *Client) PutPipelineDocumentVectors(ctx context.Context, pipelineID
 
 func (client *Client) PutPipelineDocumentVectorsWithPerf(ctx context.Context, pipelineID string, docID string, body *PutVectorsRequest, options ...RequestOption) (*LayerResponse[StatusResponse], error) {
 	out := StatusResponse{}
-	perf, err := client.request(ctx, "PUT", fmt.Sprintf("/v2/pipelines/%s/documents/%s/vectors", url.PathEscape(pipelineID), url.PathEscape(docID)), url.Values{}, body, &out, nil, options...)
+	perf, err := client.request(ctx, "PUT", fmt.Sprintf("/v2/pipelines/%s/documents/%s/vectors", url.PathEscape(pipelineID), url.PathEscape(docID)), url.Values{}, body, &out, options...)
 	if err != nil {
 		return nil, err
 	}
 	return &LayerResponse[StatusResponse]{Data: out, Perf: *perf}, nil
+}
+
+
+func (client *Client) PutSnapshotPolicy(ctx context.Context, namespace string, body *SnapshotPolicy, options ...RequestOption) (*SnapshotPolicy, error) {
+	out := SnapshotPolicy{}
+	if _, err := client.request(ctx, "PUT", fmt.Sprintf("/v2/namespaces/%s/snapshot-policy", url.PathEscape(namespace)), url.Values{}, body, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) PutSnapshotPolicyWithPerf(ctx context.Context, namespace string, body *SnapshotPolicy, options ...RequestOption) (*LayerResponse[SnapshotPolicy], error) {
+	out := SnapshotPolicy{}
+	perf, err := client.request(ctx, "PUT", fmt.Sprintf("/v2/namespaces/%s/snapshot-policy", url.PathEscape(namespace)), url.Values{}, body, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[SnapshotPolicy]{Data: out, Perf: *perf}, nil
+}
+
+
+func (client *Client) Query(ctx context.Context, body *FederatedQueryRequest, options ...RequestOption) (*FederatedQueryResponse, error) {
+	out := FederatedQueryResponse{}
+	if _, err := client.request(ctx, "POST", "/v2/query", url.Values{}, body, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) QueryWithPerf(ctx context.Context, body *FederatedQueryRequest, options ...RequestOption) (*LayerResponse[FederatedQueryResponse], error) {
+	out := FederatedQueryResponse{}
+	perf, err := client.request(ctx, "POST", "/v2/query", url.Values{}, body, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[FederatedQueryResponse]{Data: out, Perf: *perf}, nil
+}
+
+
+func (client *Client) QueryAgent(ctx context.Context, name string, body *AgentQueryRequest, options ...RequestOption) (*AgentQueryResponse, error) {
+	out := AgentQueryResponse{}
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/agents/%s/query", url.PathEscape(name)), url.Values{}, body, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) QueryAgentWithPerf(ctx context.Context, name string, body *AgentQueryRequest, options ...RequestOption) (*LayerResponse[AgentQueryResponse], error) {
+	out := AgentQueryResponse{}
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/agents/%s/query", url.PathEscape(name)), url.Values{}, body, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[AgentQueryResponse]{Data: out, Perf: *perf}, nil
 }
 
 
@@ -1551,7 +2068,7 @@ func (client *Client) QueryMetrics(ctx context.Context, params *QueryMetricsPara
 		return nil, err
 	}
 	out := PrometheusResponse{}
-	if _, err := client.request(ctx, "GET", "/v2/metrics/query", query, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "GET", "/v2/metrics/query", query, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -1563,7 +2080,7 @@ func (client *Client) QueryMetricsWithPerf(ctx context.Context, params *QueryMet
 		return nil, err
 	}
 	out := PrometheusResponse{}
-	perf, err := client.request(ctx, "GET", "/v2/metrics/query", query, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "GET", "/v2/metrics/query", query, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1577,7 +2094,7 @@ func (client *Client) QueryMetricsApiV1(ctx context.Context, params *QueryMetric
 		return nil, err
 	}
 	out := PrometheusResponse{}
-	if _, err := client.request(ctx, "GET", "/v2/metrics/api/v1/query", query, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "GET", "/v2/metrics/api/v1/query", query, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -1589,7 +2106,7 @@ func (client *Client) QueryMetricsApiV1WithPerf(ctx context.Context, params *Que
 		return nil, err
 	}
 	out := PrometheusResponse{}
-	perf, err := client.request(ctx, "GET", "/v2/metrics/api/v1/query", query, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "GET", "/v2/metrics/api/v1/query", query, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1603,7 +2120,7 @@ func (client *Client) QueryMetricsRange(ctx context.Context, params *QueryMetric
 		return nil, err
 	}
 	out := PrometheusResponse{}
-	if _, err := client.request(ctx, "GET", "/v2/metrics/query_range", query, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "GET", "/v2/metrics/query_range", query, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -1615,7 +2132,7 @@ func (client *Client) QueryMetricsRangeWithPerf(ctx context.Context, params *Que
 		return nil, err
 	}
 	out := PrometheusResponse{}
-	perf, err := client.request(ctx, "GET", "/v2/metrics/query_range", query, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "GET", "/v2/metrics/query_range", query, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1629,7 +2146,7 @@ func (client *Client) QueryMetricsRangeApiV1(ctx context.Context, params *QueryM
 		return nil, err
 	}
 	out := PrometheusResponse{}
-	if _, err := client.request(ctx, "GET", "/v2/metrics/api/v1/query_range", query, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "GET", "/v2/metrics/api/v1/query_range", query, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -1641,7 +2158,7 @@ func (client *Client) QueryMetricsRangeApiV1WithPerf(ctx context.Context, params
 		return nil, err
 	}
 	out := PrometheusResponse{}
-	perf, err := client.request(ctx, "GET", "/v2/metrics/api/v1/query_range", query, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "GET", "/v2/metrics/api/v1/query_range", query, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1651,7 +2168,7 @@ func (client *Client) QueryMetricsRangeApiV1WithPerf(ctx context.Context, params
 
 func (client *Client) QueryNamespace(ctx context.Context, namespace string, body *QueryRequest, options ...RequestOption) (*QueryResponse, error) {
 	out := QueryResponse{}
-	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/query", url.PathEscape(namespace)), url.Values{}, body, &out, &turbopufferFallback{method: "POST", path: fmt.Sprintf("/v2/namespaces/%s/query", url.PathEscape(namespace)), transform: "query_namespace"}, options...); err != nil {
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/query", url.PathEscape(namespace)), url.Values{}, body, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -1659,7 +2176,7 @@ func (client *Client) QueryNamespace(ctx context.Context, namespace string, body
 
 func (client *Client) QueryNamespaceWithPerf(ctx context.Context, namespace string, body *QueryRequest, options ...RequestOption) (*LayerResponse[QueryResponse], error) {
 	out := QueryResponse{}
-	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/query", url.PathEscape(namespace)), url.Values{}, body, &out, &turbopufferFallback{method: "POST", path: fmt.Sprintf("/v2/namespaces/%s/query", url.PathEscape(namespace)), transform: "query_namespace"}, options...)
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/query", url.PathEscape(namespace)), url.Values{}, body, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1669,7 +2186,7 @@ func (client *Client) QueryNamespaceWithPerf(ctx context.Context, namespace stri
 
 func (client *Client) QueryTurbopufferNamespace(ctx context.Context, namespace string, body TurbopufferQueryRequest, options ...RequestOption) (*TurbopufferQueryResponse, error) {
 	out := TurbopufferQueryResponse{}
-	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/query", url.PathEscape(namespace)), url.Values{}, body, &out, &turbopufferFallback{method: "POST", path: fmt.Sprintf("/v2/namespaces/%s/query", url.PathEscape(namespace))}, options...); err != nil {
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v1/namespaces/%s/query", url.PathEscape(namespace)), url.Values{}, body, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -1677,7 +2194,7 @@ func (client *Client) QueryTurbopufferNamespace(ctx context.Context, namespace s
 
 func (client *Client) QueryTurbopufferNamespaceWithPerf(ctx context.Context, namespace string, body TurbopufferQueryRequest, options ...RequestOption) (*LayerResponse[TurbopufferQueryResponse], error) {
 	out := TurbopufferQueryResponse{}
-	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/query", url.PathEscape(namespace)), url.Values{}, body, &out, &turbopufferFallback{method: "POST", path: fmt.Sprintf("/v2/namespaces/%s/query", url.PathEscape(namespace))}, options...)
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v1/namespaces/%s/query", url.PathEscape(namespace)), url.Values{}, body, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1687,7 +2204,7 @@ func (client *Client) QueryTurbopufferNamespaceWithPerf(ctx context.Context, nam
 
 func (client *Client) ResetFailedUdf(ctx context.Context, udfID string, options ...RequestOption) (*UdfItemsResponse, error) {
 	out := UdfItemsResponse{}
-	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/reset-failed", url.PathEscape(udfID)), url.Values{}, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/reset-failed", url.PathEscape(udfID)), url.Values{}, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -1695,7 +2212,7 @@ func (client *Client) ResetFailedUdf(ctx context.Context, udfID string, options 
 
 func (client *Client) ResetFailedUdfWithPerf(ctx context.Context, udfID string, options ...RequestOption) (*LayerResponse[UdfItemsResponse], error) {
 	out := UdfItemsResponse{}
-	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/reset-failed", url.PathEscape(udfID)), url.Values{}, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/reset-failed", url.PathEscape(udfID)), url.Values{}, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1705,7 +2222,7 @@ func (client *Client) ResetFailedUdfWithPerf(ctx context.Context, udfID string, 
 
 func (client *Client) ResumeUdf(ctx context.Context, udfID string, options ...RequestOption) (*Udf, error) {
 	out := Udf{}
-	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/resume", url.PathEscape(udfID)), url.Values{}, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/resume", url.PathEscape(udfID)), url.Values{}, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -1713,7 +2230,7 @@ func (client *Client) ResumeUdf(ctx context.Context, udfID string, options ...Re
 
 func (client *Client) ResumeUdfWithPerf(ctx context.Context, udfID string, options ...RequestOption) (*LayerResponse[Udf], error) {
 	out := Udf{}
-	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/resume", url.PathEscape(udfID)), url.Values{}, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/udfs/%s/resume", url.PathEscape(udfID)), url.Values{}, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1721,9 +2238,27 @@ func (client *Client) ResumeUdfWithPerf(ctx context.Context, udfID string, optio
 }
 
 
+func (client *Client) RevokeKey(ctx context.Context, keyID string, options ...RequestOption) (*ApiKey, error) {
+	out := ApiKey{}
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/keys/%s/revoke", url.PathEscape(keyID)), url.Values{}, nil, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) RevokeKeyWithPerf(ctx context.Context, keyID string, options ...RequestOption) (*LayerResponse[ApiKey], error) {
+	out := ApiKey{}
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/keys/%s/revoke", url.PathEscape(keyID)), url.Values{}, nil, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[ApiKey]{Data: out, Perf: *perf}, nil
+}
+
+
 func (client *Client) SetDocumentsStage(ctx context.Context, pipelineID string, body *SetDocumentsStageRequest, options ...RequestOption) (*DocumentsStageResponse, error) {
 	out := DocumentsStageResponse{}
-	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/pipelines/%s/documents/stage", url.PathEscape(pipelineID)), url.Values{}, body, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/pipelines/%s/documents/stage", url.PathEscape(pipelineID)), url.Values{}, body, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -1731,7 +2266,7 @@ func (client *Client) SetDocumentsStage(ctx context.Context, pipelineID string, 
 
 func (client *Client) SetDocumentsStageWithPerf(ctx context.Context, pipelineID string, body *SetDocumentsStageRequest, options ...RequestOption) (*LayerResponse[DocumentsStageResponse], error) {
 	out := DocumentsStageResponse{}
-	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/pipelines/%s/documents/stage", url.PathEscape(pipelineID)), url.Values{}, body, &out, nil, options...)
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/pipelines/%s/documents/stage", url.PathEscape(pipelineID)), url.Values{}, body, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1741,7 +2276,7 @@ func (client *Client) SetDocumentsStageWithPerf(ctx context.Context, pipelineID 
 
 func (client *Client) UpdateTurbopufferNamespaceMetadata(ctx context.Context, namespace string, body *TurbopufferMetadataPatch, options ...RequestOption) (*NamespaceMetadata, error) {
 	out := NamespaceMetadata{}
-	if _, err := client.request(ctx, "PATCH", fmt.Sprintf("/v1/namespaces/%s/metadata", url.PathEscape(namespace)), url.Values{}, body, &out, &turbopufferFallback{method: "PATCH", path: fmt.Sprintf("/v1/namespaces/%s/metadata", url.PathEscape(namespace))}, options...); err != nil {
+	if _, err := client.request(ctx, "PATCH", fmt.Sprintf("/v1/namespaces/%s/metadata", url.PathEscape(namespace)), url.Values{}, body, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -1749,7 +2284,7 @@ func (client *Client) UpdateTurbopufferNamespaceMetadata(ctx context.Context, na
 
 func (client *Client) UpdateTurbopufferNamespaceMetadataWithPerf(ctx context.Context, namespace string, body *TurbopufferMetadataPatch, options ...RequestOption) (*LayerResponse[NamespaceMetadata], error) {
 	out := NamespaceMetadata{}
-	perf, err := client.request(ctx, "PATCH", fmt.Sprintf("/v1/namespaces/%s/metadata", url.PathEscape(namespace)), url.Values{}, body, &out, &turbopufferFallback{method: "PATCH", path: fmt.Sprintf("/v1/namespaces/%s/metadata", url.PathEscape(namespace))}, options...)
+	perf, err := client.request(ctx, "PATCH", fmt.Sprintf("/v1/namespaces/%s/metadata", url.PathEscape(namespace)), url.Values{}, body, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1759,7 +2294,7 @@ func (client *Client) UpdateTurbopufferNamespaceMetadataWithPerf(ctx context.Con
 
 func (client *Client) UpdateTurbopufferNamespaceSchema(ctx context.Context, namespace string, body TurbopufferSchema, options ...RequestOption) (TurbopufferSchema, error) {
 	out := TurbopufferSchema{}
-	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v1/namespaces/%s/schema", url.PathEscape(namespace)), url.Values{}, body, &out, &turbopufferFallback{method: "POST", path: fmt.Sprintf("/v1/namespaces/%s/schema", url.PathEscape(namespace))}, options...); err != nil {
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v1/namespaces/%s/schema", url.PathEscape(namespace)), url.Values{}, body, &out, options...); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -1767,11 +2302,29 @@ func (client *Client) UpdateTurbopufferNamespaceSchema(ctx context.Context, name
 
 func (client *Client) UpdateTurbopufferNamespaceSchemaWithPerf(ctx context.Context, namespace string, body TurbopufferSchema, options ...RequestOption) (*LayerResponse[TurbopufferSchema], error) {
 	out := TurbopufferSchema{}
-	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v1/namespaces/%s/schema", url.PathEscape(namespace)), url.Values{}, body, &out, &turbopufferFallback{method: "POST", path: fmt.Sprintf("/v1/namespaces/%s/schema", url.PathEscape(namespace))}, options...)
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v1/namespaces/%s/schema", url.PathEscape(namespace)), url.Values{}, body, &out, options...)
 	if err != nil {
 		return nil, err
 	}
 	return &LayerResponse[TurbopufferSchema]{Data: out, Perf: *perf}, nil
+}
+
+
+func (client *Client) UpsertUdf(ctx context.Context, udfID string, body *UpdateUdfRequest, options ...RequestOption) (*Udf, error) {
+	out := Udf{}
+	if _, err := client.request(ctx, "PUT", fmt.Sprintf("/v2/udfs/%s", url.PathEscape(udfID)), url.Values{}, body, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) UpsertUdfWithPerf(ctx context.Context, udfID string, body *UpdateUdfRequest, options ...RequestOption) (*LayerResponse[Udf], error) {
+	out := Udf{}
+	perf, err := client.request(ctx, "PUT", fmt.Sprintf("/v2/udfs/%s", url.PathEscape(udfID)), url.Values{}, body, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[Udf]{Data: out, Perf: *perf}, nil
 }
 
 
@@ -1781,7 +2334,7 @@ func (client *Client) WarmCache(ctx context.Context, namespace string, params *W
 		return nil, err
 	}
 	out := WarmJob{}
-	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/warm", url.PathEscape(namespace)), query, nil, &out, nil, options...); err != nil {
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/warm", url.PathEscape(namespace)), query, nil, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -1793,7 +2346,7 @@ func (client *Client) WarmCacheWithPerf(ctx context.Context, namespace string, p
 		return nil, err
 	}
 	out := WarmJob{}
-	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/warm", url.PathEscape(namespace)), query, nil, &out, nil, options...)
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s/warm", url.PathEscape(namespace)), query, nil, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1803,7 +2356,7 @@ func (client *Client) WarmCacheWithPerf(ctx context.Context, namespace string, p
 
 func (client *Client) WriteNamespace(ctx context.Context, namespace string, body TurbopufferWriteRequest, options ...RequestOption) (*TurbopufferWriteResponse, error) {
 	out := TurbopufferWriteResponse{}
-	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s", url.PathEscape(namespace)), url.Values{}, body, &out, &turbopufferFallback{method: "POST", path: fmt.Sprintf("/v2/namespaces/%s", url.PathEscape(namespace))}, options...); err != nil {
+	if _, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s", url.PathEscape(namespace)), url.Values{}, body, &out, options...); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -1811,7 +2364,7 @@ func (client *Client) WriteNamespace(ctx context.Context, namespace string, body
 
 func (client *Client) WriteNamespaceWithPerf(ctx context.Context, namespace string, body TurbopufferWriteRequest, options ...RequestOption) (*LayerResponse[TurbopufferWriteResponse], error) {
 	out := TurbopufferWriteResponse{}
-	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s", url.PathEscape(namespace)), url.Values{}, body, &out, &turbopufferFallback{method: "POST", path: fmt.Sprintf("/v2/namespaces/%s", url.PathEscape(namespace))}, options...)
+	perf, err := client.request(ctx, "POST", fmt.Sprintf("/v2/namespaces/%s", url.PathEscape(namespace)), url.Values{}, body, &out, options...)
 	if err != nil {
 		return nil, err
 	}
@@ -1903,6 +2456,16 @@ func (client *Client) WriteSingleVector(ctx context.Context, pipelineID string, 
 
 func (client *Client) WriteSingleVectorWithPerf(ctx context.Context, pipelineID string, docID string, vector VectorEntry, options ...RequestOption) (*LayerResponse[StatusResponse], error) {
 	return client.PutPipelineDocumentVectorsWithPerf(ctx, pipelineID, docID, &PutVectorsRequest{Vectors: []VectorEntry{vector}}, options...)
+}
+
+func (client *Client) WriteSingleMultivector(ctx context.Context, pipelineID string, docID string, id string, vectors [][]float64, attributes map[string]interface{}, options ...RequestOption) (*StatusResponse, error) {
+	entry := VectorEntry{ID: id, Vectors: vectors, Attributes: attributes}
+	return client.PutPipelineDocumentVectors(ctx, pipelineID, docID, &PutVectorsRequest{Vectors: []VectorEntry{entry}}, options...)
+}
+
+func (client *Client) WriteSingleMultivectorWithPerf(ctx context.Context, pipelineID string, docID string, id string, vectors [][]float64, attributes map[string]interface{}, options ...RequestOption) (*LayerResponse[StatusResponse], error) {
+	entry := VectorEntry{ID: id, Vectors: vectors, Attributes: attributes}
+	return client.PutPipelineDocumentVectorsWithPerf(ctx, pipelineID, docID, &PutVectorsRequest{Vectors: []VectorEntry{entry}}, options...)
 }
 
 func (client *Client) WaitForScan(ctx context.Context, namespace string, scanID string, options *ScanWaitOptions) (*ScanJob, error) {
@@ -2038,7 +2601,7 @@ func patchColumnsRequest(ids []string, attrs map[string][]interface{}) (Turbopuf
 }
 
 
-func (client *Client) request(ctx context.Context, method string, requestPath string, query url.Values, body interface{}, out interface{}, fallback *turbopufferFallback, options ...RequestOption) (*LayerPerf, error) {
+func (client *Client) request(ctx context.Context, method string, requestPath string, query url.Values, body interface{}, out interface{}, options ...RequestOption) (*LayerPerf, error) {
 	requestOptions, err := buildRequestOptions(options)
 	if err != nil {
 		return nil, err
@@ -2046,10 +2609,7 @@ func (client *Client) request(ctx context.Context, method string, requestPath st
 	started := time.Now()
 	data, headers, err := client.doJSON(ctx, client.httpClient, client.baseURL, client.apiKey, method, requestPath, query, body, requestOptions.headers)
 	if err != nil {
-		if fallback == nil {
-			return nil, err
-		}
-		return client.requestTurbopuffer(ctx, started, err, fallback, query, body, out)
+		return nil, err
 	}
 
 	perf := &LayerPerf{LatencyMS: float64(time.Since(started).Microseconds()) / 1000}
@@ -2061,35 +2621,6 @@ func (client *Client) request(ctx context.Context, method string, requestPath st
 	return perf, nil
 }
 
-func (client *Client) requestTurbopuffer(ctx context.Context, started time.Time, originalErr error, fallback *turbopufferFallback, query url.Values, body interface{}, out interface{}) (*LayerPerf, error) {
-	if !client.canFallbackToTurbopuffer() {
-		return nil, originalErr
-	}
-	fallbackBody, err := client.fallbackBody(fallback, body)
-	if err != nil {
-		return nil, originalErr
-	}
-	log.Printf("hevlayer gateway unreachable; falling through to Turbopuffer direct for %s %s", fallback.method, fallback.path)
-	data, _, err := client.doJSON(ctx, client.turbopufferHTTPClient, client.turbopufferBaseURL, client.turbopufferAPIKey, fallback.method, fallback.path, query, fallbackBody, nil)
-	if err != nil {
-		return nil, err
-	}
-	if fallback.transform == "query_namespace" {
-		data, err = queryResponseFromTurbopufferBytes(data)
-		if err != nil {
-			return nil, err
-		}
-	}
-	perf := &LayerPerf{
-		LatencyMS: float64(time.Since(started).Microseconds()) / 1000,
-		Fallback: "turbopuffer_direct",
-	}
-	if err := decodeResponseData(data, out); err != nil {
-		return nil, err
-	}
-	return perf, nil
-}
-
 func (client *Client) doJSON(ctx context.Context, httpClient *http.Client, baseURL string, apiKey string, method string, requestPath string, query url.Values, body interface{}, headers http.Header) ([]byte, http.Header, error) {
 	endpoint := strings.TrimRight(baseURL, "/") + requestPath
 	if len(query) > 0 {
@@ -2098,11 +2629,15 @@ func (client *Client) doJSON(ctx context.Context, httpClient *http.Client, baseU
 
 	var reader io.Reader
 	if body != nil {
-		encoded, err := json.Marshal(body)
-		if err != nil {
-			return nil, nil, err
+		if raw, ok := body.(rawBody); ok {
+			reader = bytes.NewReader(raw.data)
+		} else {
+			encoded, err := json.Marshal(body)
+			if err != nil {
+				return nil, nil, err
+			}
+			reader = bytes.NewReader(encoded)
 		}
-		reader = bytes.NewReader(encoded)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
@@ -2110,7 +2645,11 @@ func (client *Client) doJSON(ctx context.Context, httpClient *http.Client, baseU
 		return nil, nil, err
 	}
 	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+		if raw, ok := body.(rawBody); ok {
+			req.Header.Set("Content-Type", raw.contentType)
+		} else {
+			req.Header.Set("Content-Type", "application/json")
+		}
 	}
 	for name, values := range headers {
 		for _, value := range values {
@@ -2166,103 +2705,11 @@ func applyLayerHeaders(out interface{}, headers http.Header) {
 		if nextCursor != "" {
 			typed.NextCursor = nextCursor
 		}
-	case *TurbopufferMultiQueryResponse:
+	case *BatchQueryResponse:
 		if stableRaw != "" {
 			typed.StableAsOf = stable
 		}
 	}
-}
-
-func (client *Client) canFallbackToTurbopuffer() bool {
-	return client.fallbackToTurbopuffer && (client.turbopufferAPIKey != "" || client.turbopufferHTTPClientExplicit)
-}
-
-func (client *Client) fallbackBody(fallback *turbopufferFallback, body interface{}) (interface{}, error) {
-	if fallback.transform == "query_namespace" {
-		return turbopufferQueryBody(body)
-	}
-	return body, nil
-}
-
-func turbopufferQueryBody(body interface{}) (map[string]interface{}, error) {
-	var query QueryRequest
-	switch typed := body.(type) {
-	case QueryRequest:
-		query = typed
-	case *QueryRequest:
-		if typed == nil {
-			return nil, fmt.Errorf("query fallback requires an object body")
-		}
-		query = *typed
-	case map[string]interface{}:
-		return turbopufferQueryBodyFromMap(typed)
-	default:
-		encoded, err := json.Marshal(body)
-		if err != nil {
-			return nil, err
-		}
-		var decoded map[string]interface{}
-		if err := json.Unmarshal(encoded, &decoded); err != nil {
-			return nil, err
-		}
-		return turbopufferQueryBodyFromMap(decoded)
-	}
-	if len(query.NearestToID) > 0 || query.Cursor != "" {
-		return nil, fmt.Errorf("query fallback cannot resolve layer-only fields")
-	}
-	if len(query.Vector) == 0 {
-		return nil, fmt.Errorf("query fallback requires vector")
-	}
-	bodyOut := map[string]interface{}{
-		"rank_by": []interface{}{"vector", "ANN", query.Vector},
-		"top_k": int64(10),
-		"consistency": map[string]interface{}{"level": "eventual"},
-	}
-	if query.TopK != 0 {
-		bodyOut["top_k"] = query.TopK
-	}
-	if query.Filters != nil {
-		bodyOut["filters"] = query.Filters
-	}
-	if query.IncludeAttributes != nil {
-		bodyOut["include_attributes"] = query.IncludeAttributes
-	}
-	return bodyOut, nil
-}
-
-func turbopufferQueryBodyFromMap(value map[string]interface{}) (map[string]interface{}, error) {
-	if value["nearest_to_id"] != nil || value["cursor"] != nil {
-		return nil, fmt.Errorf("query fallback cannot resolve layer-only fields")
-	}
-	vector, ok := value["vector"].([]interface{})
-	if !ok || len(vector) == 0 {
-		return nil, fmt.Errorf("query fallback requires vector")
-	}
-	body := map[string]interface{}{
-		"rank_by": []interface{}{"vector", "ANN", vector},
-		"top_k": int64(10),
-		"consistency": map[string]interface{}{"level": "eventual"},
-	}
-	if value["top_k"] != nil {
-		body["top_k"] = value["top_k"]
-	}
-	if value["filters"] != nil {
-		body["filters"] = value["filters"]
-	}
-	if value["include_attributes"] != nil {
-		body["include_attributes"] = value["include_attributes"]
-	}
-	return body, nil
-}
-
-func queryResponseFromTurbopufferBytes(data []byte) ([]byte, error) {
-	if len(data) > 0 {
-		var raw interface{}
-		if err := json.Unmarshal(data, &raw); err != nil {
-			return nil, err
-		}
-	}
-	return data, nil
 }
 
 func buildRequestOptions(options []RequestOption) (requestOptions, error) {
@@ -2326,10 +2773,6 @@ func addQueryValue(query url.Values, name string, value interface{}) error {
 		}
 	}
 	return nil
-}
-
-func cleanToken(value string) string {
-	return strings.TrimSpace(value)
 }
 
 func cleanHistoryTags(tags []string) ([]string, error) {

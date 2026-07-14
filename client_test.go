@@ -3,19 +3,10 @@ package hevlayer
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 )
-
-var errGatewayDown = errors.New("gateway down")
-
-type errorTransport struct{}
-
-func (errorTransport) RoundTrip(*http.Request) (*http.Response, error) {
-	return nil, errGatewayDown
-}
 
 func TestClientCoreOperations(t *testing.T) {
 	ctx := context.Background()
@@ -89,13 +80,23 @@ func TestClientCoreOperations(t *testing.T) {
 			}
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"pipeline_id": "p1", "stage": "indexed", "updated": 2})
 		case r.Method == http.MethodPut && r.URL.Path == "/v2/pipelines/p1/documents/doc-1/vectors":
-			seen["writeSingleVector"] = true
 			var body PutVectorsRequest
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatal(err)
 			}
-			if len(body.Vectors) != 1 || body.Vectors[0].ID != "doc-1:chunk-1" {
+			if len(body.Vectors) != 1 {
 				t.Fatalf("unexpected vector body: %#v", body)
+			}
+			switch body.Vectors[0].ID {
+			case "doc-1:chunk-1":
+				seen["writeSingleVector"] = true
+			case "doc-1:multi-1":
+				seen["writeSingleMultivector"] = true
+				if len(body.Vectors[0].Vectors) != 2 || body.Vectors[0].Vectors[1][1] != 0.4 {
+					t.Fatalf("unexpected multivector body: %#v", body)
+				}
+			default:
+				t.Fatalf("unexpected vector id: %#v", body)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "message": "vector"})
 		case r.Method == http.MethodPost && r.URL.Path == "/v2/namespaces/ns/warm":
@@ -179,6 +180,9 @@ func TestClientCoreOperations(t *testing.T) {
 	if _, err := client.WriteSingleVector(ctx, "p1", "doc-1", VectorEntry{ID: "doc-1:chunk-1", Vector: []float64{0.3, 0.4}, Attributes: map[string]interface{}{"kind": "review"}}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := client.WriteSingleMultivector(ctx, "p1", "doc-1", "doc-1:multi-1", [][]float64{{0.1, 0.2}, {0.3, 0.4}}, map[string]interface{}{"kind": "late"}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := client.PatchColumns(ctx, "ns", []string{"doc-1", "doc-2"}, map[string][]interface{}{"tags": []interface{}{[]interface{}{"durable"}, []interface{}{"soft"}}, "tags_v": []interface{}{"v1", "v1"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -214,87 +218,10 @@ func TestClientCoreOperations(t *testing.T) {
 	if _, err := client.DeleteUdf(ctx, "product-tags"); err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{"list", "queryNamespace", "writeNamespace", "deleteNamespace", "createPipelineConflict", "listPipelines", "completeDocuments", "writeSingleVector", "patchColumns", "warmNamespace", "createScan", "getScan", "createUdf", "getUdf", "status", "discover", "deleteUdf"} {
+	for _, key := range []string{"list", "queryNamespace", "writeNamespace", "deleteNamespace", "createPipelineConflict", "listPipelines", "completeDocuments", "writeSingleVector", "writeSingleMultivector", "patchColumns", "warmNamespace", "createScan", "getScan", "createUdf", "getUdf", "status", "discover", "deleteUdf"} {
 		if !seen[key] {
 			t.Fatalf("operation %s was not exercised", key)
 		}
-	}
-}
-
-func TestDirectTurbopufferFallback(t *testing.T) {
-	ctx := context.Background()
-	fallbackCalls := map[string]bool{}
-	direct := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer tpuf-key" {
-			t.Fatalf("missing direct bearer token: %q", r.Header.Get("Authorization"))
-		}
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/v2/namespaces/ns/query":
-			fallbackCalls["query"] = true
-			var body map[string]interface{}
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				t.Fatal(err)
-			}
-			if body["top_k"].(float64) != 1 {
-				t.Fatalf("unexpected fallback query body: %#v", body)
-			}
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"rows": []map[string]interface{}{{"id": "doc-1", "$dist": 0.1, "title": "Boot", "vector": []float64{9, 9}}}})
-		case r.Method == http.MethodPost && r.URL.Path == "/v2/namespaces/ns":
-			fallbackCalls["write"] = true
-			var body map[string]interface{}
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				t.Fatal(err)
-			}
-			if body["upsert_rows"] == nil {
-				t.Fatalf("fallback write body missing upsert_rows: %#v", body)
-			}
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "OK", "message": "direct", "rows_affected": 1, "billing": map[string]interface{}{}})
-		default:
-			t.Fatalf("unexpected direct fallback request: %s %s", r.Method, r.URL.String())
-		}
-	}))
-	defer direct.Close()
-
-	client := NewClient(
-		WithBaseURL("https://gateway-down.test"),
-		WithHTTPClient(&http.Client{Transport: errorTransport{}}),
-		WithTurbopufferBaseURL(direct.URL),
-		WithTurbopufferAPIKey("tpuf-key"),
-	)
-	query, err := client.QueryNamespaceWithPerf(ctx, "ns", &QueryRequest{Vector: []float64{0.1, 0.2}, TopK: 1, IncludeAttributes: []string{"title"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if query.Perf.Fallback != "turbopuffer_direct" || query.Data.Rows[0]["title"] != "Boot" {
-		t.Fatalf("unexpected fallback query response: %#v", query)
-	}
-	write, err := client.WriteNamespace(ctx, "ns", TurbopufferWriteRequest{"upsert_rows": []map[string]interface{}{{"id": "doc-1", "vector": []float64{0.1, 0.2}}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if write.Status != "OK" || write.RowsAffected != 1 {
-		t.Fatalf("unexpected fallback write response: %#v", write)
-	}
-	if _, err := client.FetchDocument(ctx, "ns", "doc-1", nil); !errors.Is(err, errGatewayDown) {
-		t.Fatalf("fetch_document must not fall through, got %v", err)
-	}
-	if _, err := client.QueryNamespace(ctx, "ns", &QueryRequest{NearestToID: []string{"doc-1"}, TopK: 1}); !errors.Is(err, errGatewayDown) {
-		t.Fatalf("nearest_to_id query fallback requires the gateway, got %v", err)
-	}
-	if !fallbackCalls["query"] || !fallbackCalls["write"] {
-		t.Fatalf("fallback calls missing: %#v", fallbackCalls)
-	}
-
-	disabled := NewClient(
-		WithBaseURL("https://gateway-down.test"),
-		WithHTTPClient(&http.Client{Transport: errorTransport{}}),
-		WithTurbopufferBaseURL(direct.URL),
-		WithTurbopufferAPIKey("tpuf-key"),
-		WithFallbackToTurbopuffer(false),
-	)
-	if _, err := disabled.WriteNamespace(ctx, "ns", TurbopufferWriteRequest{"upsert_rows": []map[string]interface{}{{"id": "doc-1"}}}); !errors.Is(err, errGatewayDown) {
-		t.Fatalf("disabled fallback should return gateway error, got %v", err)
 	}
 }
 

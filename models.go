@@ -2,6 +2,24 @@ package hevlayer
 
 type JSONValue = interface{}
 
+type LicenseSurfaceState struct {
+	State string `json:"state"`
+	SecondsToDeadline int64 `json:"seconds_to_deadline"`
+	GraceSecondsRemaining int64 `json:"grace_seconds_remaining"`
+}
+
+type LicenseState struct {
+	Valid bool `json:"valid"`
+	State string `json:"state,omitempty"`
+	Reason string `json:"reason,omitempty"`
+	Sub string `json:"sub,omitempty"`
+	Tier string `json:"tier,omitempty"`
+	Features []string `json:"features,omitempty"`
+	Limits map[string]int64 `json:"limits,omitempty"`
+	Exp string `json:"exp,omitempty"`
+	Gateway LicenseSurfaceState `json:"gateway"`
+}
+
 type CreatePipelineRequest struct {
 	ID string `json:"id"`
 	TargetNamespace string `json:"target_namespace"`
@@ -21,7 +39,9 @@ type PipelineList struct {
 
 type PipelineStatus struct {
 	PipelineID string `json:"pipeline_id"`
+	Status string `json:"status"`
 	Counts map[string]int64 `json:"counts"`
+	FailedReasons map[string]int64 `json:"failed_reasons"`
 	PendingCount int64 `json:"pending_count"`
 	ProcessingCount int64 `json:"processing_count"`
 	FailedCount int64 `json:"failed_count"`
@@ -88,7 +108,8 @@ type GetChunksResponse []Chunk
 
 type VectorEntry struct {
 	ID string `json:"id"`
-	Vector []float64 `json:"vector"`
+	Vector []float64 `json:"vector,omitempty"`
+	Vectors [][]float64 `json:"vectors,omitempty"`
 	Attributes map[string]interface{} `json:"attributes,omitempty"`
 }
 
@@ -98,6 +119,10 @@ type PutVectorsRequest struct {
 
 type CreateUdfRequest struct {
 	ID string `json:"id"`
+	Spec UdfSpec `json:"spec"`
+}
+
+type UpdateUdfRequest struct {
 	Spec UdfSpec `json:"spec"`
 }
 
@@ -220,6 +245,8 @@ type UdfCompleteRequest struct {
 type UdfCompleteItem struct {
 	Namespace string `json:"namespace"`
 	ID string `json:"id"`
+	Vector []float64 `json:"vector,omitempty"`
+	Vectors [][]float64 `json:"vectors,omitempty"`
 	Attributes map[string]interface{} `json:"attributes,omitempty"`
 }
 
@@ -240,6 +267,111 @@ type UdfFailItem struct {
 type UdfItemsResponse struct {
 	UdfID string `json:"udf_id"`
 	Updated int64 `json:"updated"`
+}
+
+type CostWindow string
+
+type CostStep string
+
+type CostBasis string
+
+type CostTotals struct {
+	TotalUsd float64 `json:"total_usd"`
+	AwsUsd float64 `json:"aws_usd"`
+	TurbopufferUsd float64 `json:"turbopuffer_usd"`
+	CostPerQueryUsd float64 `json:"cost_per_query_usd,omitempty"`
+	CostPerDocumentUsd float64 `json:"cost_per_document_usd,omitempty"`
+	CostPerTibIndexedUsd float64 `json:"cost_per_tib_indexed_usd,omitempty"`
+}
+
+type CostLine struct {
+	Provider string `json:"provider"`
+	Service string `json:"service"`
+	Basis CostBasis `json:"basis"`
+	ServiceDetail string `json:"service_detail,omitempty"`
+	Region string `json:"region,omitempty"`
+	Site string `json:"site,omitempty"`
+	RateCardVersion string `json:"rate_card_version,omitempty"`
+	AmountUsd float64 `json:"amount_usd"`
+	Qty float64 `json:"qty,omitempty"`
+	Unit string `json:"unit,omitempty"`
+	QtyBytes int64 `json:"qty_bytes,omitempty"`
+	Breakdown []map[string]interface{} `json:"breakdown,omitempty"`
+}
+
+type CostRateCardStatus struct {
+	TurbopufferRateCardVersion string `json:"turbopuffer_rate_card_version"`
+	AwsCostSource string `json:"aws_cost_source"`
+	AwsCostRefreshedAtMs int64 `json:"aws_cost_refreshed_at_ms"`
+	AwsCostStale bool `json:"aws_cost_stale"`
+	AwsPricingStale bool `json:"aws_pricing_stale"`
+	AwsPricingRefreshedAtMs int64 `json:"aws_pricing_refreshed_at_ms"`
+}
+
+type CostSnapshot struct {
+	AsOfMs int64 `json:"as_of_ms"`
+	WindowSeconds int64 `json:"window_seconds"`
+	Totals CostTotals `json:"totals"`
+	Lines []CostLine `json:"lines"`
+	RateCardStatus CostRateCardStatus `json:"rate_card_status"`
+	Caveats []string `json:"caveats"`
+}
+
+type CostSample []interface{}
+
+type CostSeries struct {
+	Provider string `json:"provider,omitempty"`
+	Service string `json:"service,omitempty"`
+	Basis CostBasis `json:"basis,omitempty"`
+	ServiceDetail string `json:"service_detail,omitempty"`
+	Region string `json:"region,omitempty"`
+	Site string `json:"site,omitempty"`
+	RateCardVersion string `json:"rate_card_version,omitempty"`
+	Label string `json:"label,omitempty"`
+	Samples []CostSample `json:"samples"`
+}
+
+type CostTimeseries struct {
+	WindowSeconds int64 `json:"window_seconds"`
+	StepSeconds int64 `json:"step_seconds"`
+	Series []CostSeries `json:"series"`
+}
+
+type AwsInstancePrice struct {
+	InstanceType string `json:"instance_type"`
+	Family string `json:"family"`
+	Vcpu int64 `json:"vcpu"`
+	MemoryGib float64 `json:"memory_gib"`
+	NvmeGib float64 `json:"nvme_gib"`
+	HourlyUsd float64 `json:"hourly_usd"`
+}
+
+type AwsRateCard struct {
+	Role string `json:"role"`
+	Region string `json:"region"`
+	RefreshedAtMs int64 `json:"refreshed_at_ms"`
+	TtlSeconds int64 `json:"ttl_seconds"`
+	Stale bool `json:"stale"`
+	Items []AwsInstancePrice `json:"items"`
+}
+
+type TurbopufferRateLine struct {
+	Service string `json:"service"`
+	Unit string `json:"unit"`
+	Usd float64 `json:"usd"`
+}
+
+type TurbopufferRateCard struct {
+	Version string `json:"version"`
+	VerifiedBy string `json:"verified_by"`
+	VerifiedAt string `json:"verified_at"`
+	Source string `json:"source"`
+	Lines []TurbopufferRateLine `json:"lines"`
+}
+
+type RateCard struct {
+	Aws AwsRateCard `json:"aws"`
+	Turbopuffer TurbopufferRateCard `json:"turbopuffer"`
 }
 
 type Document struct {
@@ -265,6 +397,12 @@ type StatusResponse struct {
 	RowsPatched int64 `json:"rows_patched,omitempty"`
 	RowsDeleted int64 `json:"rows_deleted,omitempty"`
 	Billing map[string]interface{} `json:"billing,omitempty"`
+}
+
+type BlobPutResponse struct {
+	Ref string `json:"ref"`
+	Sha256 string `json:"sha256"`
+	Size int64 `json:"size"`
 }
 
 type TurbopufferNamespaceSummary struct {
@@ -317,13 +455,13 @@ type TurbopufferQueryResponse struct {
 	Performance map[string]interface{} `json:"performance,omitempty"`
 }
 
-type TurbopufferMultiQueryRequest struct {
+type BatchQueryRequest struct {
 	Queries []TurbopufferQueryRequest `json:"queries"`
 	Consistency map[string]interface{} `json:"consistency,omitempty"`
 	VectorEncoding string `json:"vector_encoding,omitempty"`
 }
 
-type TurbopufferMultiQueryResponse struct {
+type BatchQueryResponse struct {
 	Results []TurbopufferQueryResponse `json:"results"`
 	Billing map[string]interface{} `json:"billing,omitempty"`
 	Performance map[string]interface{} `json:"performance,omitempty"`
@@ -350,8 +488,11 @@ type TurbopufferRecallResponse struct {
 }
 
 type HintCacheWarmResponse struct {
-	Status string `json:"status,omitempty"`
-	Message string `json:"message,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
+	Turbopuffer WarmStepResponse `json:"turbopuffer,omitempty"`
+	Documents WarmDocumentsResponse `json:"documents,omitempty"`
+	Snapshots WarmSnapshotsResponse `json:"snapshots,omitempty"`
+	Blobs WarmBlobsResponse `json:"blobs,omitempty"`
 }
 
 type JobStatus string
@@ -373,12 +514,39 @@ type CreateSnapshotRequest struct {
 	PageSize int64 `json:"page_size,omitempty"`
 }
 
+type SnapshotPolicy struct {
+	FacetFields []string `json:"facetFields,omitempty"`
+	Interval string `json:"interval,omitempty"`
+	Retention string `json:"retention,omitempty"`
+}
+
+type CreateCheckpointRequest struct {
+	Label string `json:"label"`
+}
+
+type Checkpoint struct {
+	Namespace string `json:"namespace"`
+	Label string `json:"label"`
+	WatermarkMs int64 `json:"watermark_ms"`
+	Sha string `json:"sha"`
+	RowCount int64 `json:"row_count"`
+}
+
+type CheckpointList struct {
+	Checkpoints []Checkpoint `json:"checkpoints"`
+	NextCursor string `json:"next_cursor,omitempty"`
+}
+
 type CreateScanRequest struct {
 	Source ScanCountSource `json:"source,omitempty"`
 	Filters interface{} `json:"filters,omitempty"`
+	AsOf int64 `json:"as_of,omitempty"`
+	Between []int64 `json:"between,omitempty"`
 	Fts FtsScan `json:"fts,omitempty"`
+	HybridText HybridTextScan `json:"hybrid_text,omitempty"`
 	Ann AnnScan `json:"ann,omitempty"`
 	Mode ScanMode `json:"mode,omitempty"`
+	Field string `json:"field,omitempty"`
 	Exhaustive bool `json:"exhaustive,omitempty"`
 	Threads int64 `json:"threads,omitempty"`
 	PageSize int64 `json:"page_size,omitempty"`
@@ -388,6 +556,12 @@ type CreateScanRequest struct {
 type FtsScan struct {
 	Field string `json:"field"`
 	Query string `json:"query"`
+}
+
+type HybridTextScan struct {
+	Field string `json:"field"`
+	Query string `json:"query"`
+	Fuzziness interface{} `json:"fuzziness,omitempty"`
 }
 
 type AnnScan struct {
@@ -417,11 +591,26 @@ type WarmSnapshotsResponse struct {
 	Sha string `json:"sha,omitempty"`
 }
 
+type WarmBlobsResponse struct {
+	Enabled bool `json:"enabled"`
+	Status WarmStepStatus `json:"status"`
+	Attributes []string `json:"attributes,omitempty"`
+	BudgetBytes int64 `json:"budget_bytes,omitempty"`
+	DocumentsScanned int64 `json:"documents_scanned"`
+	RefsSeen int64 `json:"refs_seen"`
+	Objects int64 `json:"objects"`
+	Bytes int64 `json:"bytes"`
+	Missing int64 `json:"missing"`
+	InvalidRefs int64 `json:"invalid_refs"`
+	BudgetExhausted bool `json:"budget_exhausted"`
+}
+
 type WarmCacheResponse struct {
 	Namespace string `json:"namespace"`
 	Turbopuffer WarmStepResponse `json:"turbopuffer"`
 	Documents WarmDocumentsResponse `json:"documents"`
 	Snapshots WarmSnapshotsResponse `json:"snapshots"`
+	Blobs WarmBlobsResponse `json:"blobs"`
 }
 
 type JobBase struct {
@@ -482,8 +671,16 @@ type ScanJob struct {
 	CreatedAt string `json:"created_at"`
 	CompletedAt string `json:"completed_at,omitempty"`
 	Error string `json:"error,omitempty"`
+	Mode ScanMode `json:"mode"`
+	Field string `json:"field,omitempty"`
 	Source ScanSource `json:"source"`
 	EffectiveSource ScanSource `json:"effective_source,omitempty"`
+	UniqueValues int64 `json:"unique_values,omitempty"`
+	Truncated bool `json:"truncated,omitempty"`
+	Bounded bool `json:"bounded,omitempty"`
+	Approximate bool `json:"approximate,omitempty"`
+	SnapshotSha string `json:"snapshot_sha,omitempty"`
+	WatermarkMs int64 `json:"watermark_ms,omitempty"`
 	Threads int64 `json:"threads,omitempty"`
 }
 
@@ -491,9 +688,15 @@ type ScanJobList struct {
 	Scans []ScanJob `json:"scans"`
 }
 
-type FieldValueResult struct {
-	Value string `json:"value"`
-	DocCount int64 `json:"doc_count"`
+type ScanValue struct {
+	V string `json:"v"`
+	N int64 `json:"n"`
+}
+
+type ScanValuesResponse struct {
+	Values []ScanValue `json:"values"`
+	Total int64 `json:"total"`
+	Truncated bool `json:"truncated"`
 }
 
 type ScanIdsResponse struct {
@@ -560,6 +763,32 @@ type NamespaceMetadata struct {
 	LastWriteAt string `json:"last_write_at,omitempty"`
 	UpdatedAt string `json:"updated_at"`
 	Config map[string]interface{} `json:"config,omitempty"`
+	Index IndexState `json:"index,omitempty"`
+	Layer NamespaceMetadataLayer `json:"layer,omitempty"`
+}
+
+type NamespaceMetadataLayer struct {
+	StableAsOf int64 `json:"stable_as_of,omitempty"`
+	IsStable bool `json:"is_stable,omitempty"`
+	Indexed bool `json:"indexed,omitempty"`
+	IndexLagRows int64 `json:"index_lag_rows,omitempty"`
+	SchemaVersion int64 `json:"schema_version,omitempty"`
+	InitState string `json:"init_state,omitempty"`
+	InitLagRows int64 `json:"init_lag_rows,omitempty"`
+	ShardCount int64 `json:"shard_count,omitempty"`
+	ShardState string `json:"shard_state,omitempty"`
+	ShardLagRows int64 `json:"shard_lag_rows,omitempty"`
+	ScatterGatherActive bool `json:"scatter_gather_active,omitempty"`
+}
+
+type InitNamespaceRequest struct {
+	SchemaVersion int64 `json:"schema_version,omitempty"`
+	ShardCount int64 `json:"shard_count,omitempty"`
+}
+
+type InitNamespaceResponse struct {
+	Namespace string `json:"namespace"`
+	Layer NamespaceMetadataLayer `json:"layer"`
 }
 
 type QueryRequest struct {
@@ -567,8 +796,96 @@ type QueryRequest struct {
 	NearestToID []string `json:"nearest_to_id,omitempty"`
 	TopK int64 `json:"top_k,omitempty"`
 	Filters interface{} `json:"filters,omitempty"`
+	AsOf int64 `json:"as_of,omitempty"`
+	Between []int64 `json:"between,omitempty"`
 	IncludeAttributes interface{} `json:"include_attributes,omitempty"`
+	IncludeLegBreakdown bool `json:"include_leg_breakdown,omitempty"`
 	Cursor string `json:"cursor,omitempty"`
+	RankBy []interface{} `json:"rank_by,omitempty"`
+}
+
+type FederatedQueryRequest struct {
+	Vector []float64 `json:"vector,omitempty"`
+	NearestToID []string `json:"nearest_to_id,omitempty"`
+	TopK int64 `json:"top_k,omitempty"`
+	Filters interface{} `json:"filters,omitempty"`
+	AsOf int64 `json:"as_of,omitempty"`
+	Between []int64 `json:"between,omitempty"`
+	IncludeAttributes interface{} `json:"include_attributes,omitempty"`
+	IncludeLegBreakdown bool `json:"include_leg_breakdown,omitempty"`
+	Cursor string `json:"cursor,omitempty"`
+	RankBy []interface{} `json:"rank_by,omitempty"`
+	Namespaces []string `json:"namespaces,omitempty"`
+	Strict bool `json:"strict,omitempty"`
+	Fusion FederatedFusionOptions `json:"fusion,omitempty"`
+}
+
+type FederatedFusionOptions struct {
+	PerNamespaceLimit int64 `json:"per_namespace_limit,omitempty"`
+	RankConstant int64 `json:"rank_constant,omitempty"`
+}
+
+type AgentQueryRequest struct {
+	Query string `json:"query"`
+	Vector []float64 `json:"vector,omitempty"`
+	TopK int64 `json:"top_k,omitempty"`
+}
+
+type AgentQueryResponse struct {
+	Rows []map[string]interface{} `json:"rows"`
+	Merge map[string]interface{} `json:"merge"`
+	Routing RoutingEcho `json:"routing,omitempty"`
+	Hybrid HybridEcho `json:"hybrid,omitempty"`
+	Namespaces []FederatedNamespaceResult `json:"namespaces"`
+	Errors []FederatedNamespaceError `json:"errors,omitempty"`
+	Agent AgentEcho `json:"agent,omitempty"`
+}
+
+type AgentEcho struct {
+	Turns string `json:"turns"`
+	DeadlineHit bool `json:"deadlineHit"`
+	RecallDepth int64 `json:"recallDepth"`
+	RelevanceWeight float64 `json:"relevanceWeight"`
+	Queries []map[string]interface{} `json:"queries"`
+	Trace string `json:"trace,omitempty"`
+}
+
+type FederatedQueryResponse struct {
+	Rows []map[string]interface{} `json:"rows"`
+	Merge map[string]interface{} `json:"merge"`
+	Routing RoutingEcho `json:"routing,omitempty"`
+	Hybrid HybridEcho `json:"hybrid,omitempty"`
+	Namespaces []FederatedNamespaceResult `json:"namespaces"`
+	Errors []FederatedNamespaceError `json:"errors,omitempty"`
+}
+
+type FederatedNamespaceResult struct {
+	Namespace string `json:"namespace"`
+	StableAsOf int64 `json:"stable_as_of,omitempty"`
+	Matched int64 `json:"matched"`
+}
+
+type FederatedNamespaceError struct {
+	Namespace string `json:"namespace"`
+	Error string `json:"error"`
+}
+
+type HybridEcho struct {
+	Tokens []string `json:"tokens"`
+	TokensDropped int64 `json:"tokens_dropped"`
+	Fuzziness interface{} `json:"fuzziness"`
+	RankConstant int64 `json:"rank_constant"`
+	Legs int64 `json:"legs"`
+	PerLegLimit int64 `json:"per_leg_limit"`
+	Surfaced bool `json:"surfaced,omitempty"`
+	Threads int64 `json:"threads,omitempty"`
+}
+
+type RoutingEcho struct {
+	Route string `json:"route"`
+	Policy string `json:"policy"`
+	Tokens int64 `json:"tokens"`
+	Executed bool `json:"executed"`
 }
 
 type QueryResponse struct {
@@ -579,6 +896,8 @@ type QueryResponse struct {
 	Performance map[string]interface{} `json:"performance,omitempty"`
 	StableAsOf int64 `json:"stable_as_of,omitempty"`
 	NextCursor string `json:"next_cursor,omitempty"`
+	Hybrid HybridEcho `json:"hybrid,omitempty"`
+	Routing RoutingEcho `json:"routing,omitempty"`
 }
 
 type Error struct {
@@ -589,12 +908,14 @@ type Error struct {
 type SnapshotHistoryEntry struct {
 	WatermarkMs int64 `json:"watermark_ms"`
 	Sha string `json:"sha"`
+	Tags []string `json:"tags,omitempty"`
 }
 
 type SnapshotBody struct {
 	Namespace string `json:"namespace"`
 	WatermarkMs int64 `json:"watermark_ms"`
 	Sha string `json:"sha"`
+	RowCount int64 `json:"row_count,omitempty"`
 	Fields []SnapshotField `json:"fields"`
 	FieldsSkipped []SnapshotFieldSkipped `json:"fields_skipped"`
 }
@@ -688,4 +1009,183 @@ type ClickstreamEvent struct {
 type ClickstreamListResponse struct {
 	Events []ClickstreamEvent `json:"events"`
 	NextCursor string `json:"next_cursor,omitempty"`
+}
+
+type KubernetesCondition map[string]interface{}
+
+type SecretKeyRef struct {
+	Name string `json:"name"`
+	Key string `json:"key"`
+}
+
+type VectorStoreEndpoint struct {
+	Url string `json:"url"`
+	Region string `json:"region"`
+}
+
+type VectorStoreTurbopuffer struct {
+	OrgID string `json:"orgId"`
+}
+
+type VectorStoreCredential struct {
+	SecretRef SecretKeyRef `json:"secretRef"`
+}
+
+type VectorStoreInboundAuth struct {
+	Mode string `json:"mode,omitempty"`
+}
+
+type VectorStoreStatus struct {
+	Reachable bool `json:"reachable,omitempty"`
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	Conditions []KubernetesCondition `json:"conditions"`
+}
+
+type VectorStore struct {
+	Name string `json:"name"`
+	Kind string `json:"kind"`
+	Default bool `json:"default"`
+	Endpoint VectorStoreEndpoint `json:"endpoint"`
+	Turbopuffer VectorStoreTurbopuffer `json:"turbopuffer,omitempty"`
+	Credential VectorStoreCredential `json:"credential"`
+	InboundAuth VectorStoreInboundAuth `json:"inboundAuth,omitempty"`
+	Status VectorStoreStatus `json:"status"`
+	TurbopufferUrl string `json:"turbopufferUrl,omitempty"`
+}
+
+type VectorStoreList struct {
+	Vectorstores []VectorStore `json:"vectorstores"`
+}
+
+type WarehouseSecretRef struct {
+	Name string `json:"name"`
+}
+
+type WarehousePool struct {
+	Size int64 `json:"size"`
+	Timeout string `json:"timeout"`
+}
+
+type SnowflakeWarehouse struct {
+	Account string `json:"account"`
+	User string `json:"user"`
+	Role string `json:"role,omitempty"`
+	Warehouse string `json:"warehouse"`
+	KeyPairSecretRef WarehouseSecretRef `json:"keyPairSecretRef"`
+	Pool WarehousePool `json:"pool,omitempty"`
+}
+
+type RestWarehouse struct {
+	BaseUrl string `json:"baseUrl"`
+	Auth RestWarehouseAuth `json:"auth,omitempty"`
+	RateLimit RestWarehouseRateLimit `json:"rateLimit,omitempty"`
+	Verify RestWarehouseVerify `json:"verify"`
+}
+
+type RestWarehouseAuth struct {
+	In string `json:"in"`
+	Name string `json:"name"`
+	SecretRef WarehouseSecretRef `json:"secretRef"`
+}
+
+type RestWarehouseRateLimit struct {
+	RequestsPerSecond float64 `json:"requestsPerSecond"`
+}
+
+type RestWarehouseVerify struct {
+	Path string `json:"path"`
+	Query map[string]string `json:"query,omitempty"`
+}
+
+type WarehousePhase string
+
+type WarehouseConsumers struct {
+	Pipelines int64 `json:"pipelines"`
+	ApiKeys int64 `json:"apiKeys"`
+}
+
+type WarehouseStatus struct {
+	Phase WarehousePhase `json:"phase,omitempty"`
+	VerifiedAt string `json:"verifiedAt,omitempty"`
+	FailureReason string `json:"failureReason,omitempty"`
+	Consumers WarehouseConsumers `json:"consumers"`
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	Conditions []KubernetesCondition `json:"conditions"`
+}
+
+type Warehouse struct {
+	Name string `json:"name"`
+	Namespace string `json:"namespace"`
+	Kind string `json:"kind"`
+	Snowflake SnowflakeWarehouse `json:"snowflake,omitempty"`
+	Rest RestWarehouse `json:"rest,omitempty"`
+	VerifyInterval string `json:"verifyInterval"`
+	Status WarehouseStatus `json:"status"`
+}
+
+type WarehouseList struct {
+	Warehouses []Warehouse `json:"warehouses"`
+}
+
+type ApiKeyEntitlement struct {
+	Scopes []string `json:"scopes,omitempty"`
+	Namespaces []string `json:"namespaces,omitempty"`
+	Claims []string `json:"claims,omitempty"`
+}
+
+type ApiKeyEntitlements map[string]ApiKeyEntitlement
+
+type ApiKeyPhase string
+
+type ApiKey struct {
+	KeyID string `json:"keyId"`
+	Name string `json:"name"`
+	Owner string `json:"owner,omitempty"`
+	Description string `json:"description,omitempty"`
+	Entitlements ApiKeyEntitlements `json:"entitlements"`
+	ExpiresAfter string `json:"expiresAfter,omitempty"`
+	Phase ApiKeyPhase `json:"phase"`
+	CreatedAt string `json:"createdAt"`
+	ExpiresAt string `json:"expiresAt,omitempty"`
+	RevokedAt string `json:"revokedAt,omitempty"`
+	LastSeenAt string `json:"lastSeenAt,omitempty"`
+	LookupHash string `json:"lookupHash,omitempty"`
+	SecretRef map[string]interface{} `json:"secretRef,omitempty"`
+}
+
+type ApiKeyList struct {
+	Keys []ApiKey `json:"keys"`
+}
+
+type MintKeyRequest struct {
+	Name string `json:"name"`
+	Owner string `json:"owner,omitempty"`
+	Description string `json:"description,omitempty"`
+	Entitlements ApiKeyEntitlements `json:"entitlements,omitempty"`
+	ExpiresAfter string `json:"expiresAfter,omitempty"`
+}
+
+type MintKeyResponse struct {
+	KeyID string `json:"keyId"`
+	Name string `json:"name"`
+	Owner string `json:"owner,omitempty"`
+	Description string `json:"description,omitempty"`
+	Entitlements ApiKeyEntitlements `json:"entitlements"`
+	ExpiresAfter string `json:"expiresAfter,omitempty"`
+	Phase ApiKeyPhase `json:"phase"`
+	CreatedAt string `json:"createdAt"`
+	ExpiresAt string `json:"expiresAt,omitempty"`
+	Token string `json:"token"`
+}
+
+type AuthenticateKeyRequest struct {
+	Token string `json:"token"`
+}
+
+type AuthenticateKeyResponse struct {
+	KeyID string `json:"keyId"`
+	Name string `json:"name"`
+	Owner string `json:"owner,omitempty"`
+	Entitlements ApiKeyEntitlements `json:"entitlements"`
+	ExpiresAt string `json:"expiresAt,omitempty"`
 }
