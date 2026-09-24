@@ -1,7 +1,7 @@
 # hevlayer Go Client
 
 > **Generated mirror — do not send PRs here.**
-> This repository is published automatically from the private `hev/layer`
+> This repository is published automatically from the private `hev/layer-pro`
 > monorepo, derived from the gateway's OpenAPI spec. Edits to client code here
 > are overwritten on the next release. File bugs and requests as
 > [issues](https://github.com/hev/layer-go/issues); fixes land upstream and
