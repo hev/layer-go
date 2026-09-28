@@ -110,6 +110,9 @@ type HevlayerError struct {
 	StatusCode int
 	Kind string
 	Message string
+	// Feature is the stable identifier on UnsupportedByStore rejections;
+	// match on it rather than parsing Message.
+	Feature string
 	Body []byte
 }
 
@@ -1174,6 +1177,24 @@ func (client *Client) GetMetricCatalogEntryWithPerf(ctx context.Context, name st
 }
 
 
+func (client *Client) GetNamespaceCapabilities(ctx context.Context, namespace string, options ...RequestOption) (*CapabilitiesReport, error) {
+	out := CapabilitiesReport{}
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/capabilities", url.PathEscape(namespace)), url.Values{}, nil, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) GetNamespaceCapabilitiesWithPerf(ctx context.Context, namespace string, options ...RequestOption) (*LayerResponse[CapabilitiesReport], error) {
+	out := CapabilitiesReport{}
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/capabilities", url.PathEscape(namespace)), url.Values{}, nil, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[CapabilitiesReport]{Data: out, Perf: *perf}, nil
+}
+
+
 func (client *Client) GetNamespaceMetadata(ctx context.Context, namespace string, options ...RequestOption) (*NamespaceMetadata, error) {
 	out := NamespaceMetadata{}
 	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/namespaces/%s/metadata", url.PathEscape(namespace)), url.Values{}, nil, &out, options...); err != nil {
@@ -1413,6 +1434,24 @@ func (client *Client) GetVectorstoreWithPerf(ctx context.Context, name string, o
 		return nil, err
 	}
 	return &LayerResponse[VectorStore]{Data: out, Perf: *perf}, nil
+}
+
+
+func (client *Client) GetVectorStoreCapabilities(ctx context.Context, name string, options ...RequestOption) (*CapabilitiesReport, error) {
+	out := CapabilitiesReport{}
+	if _, err := client.request(ctx, "GET", fmt.Sprintf("/v2/vectorstores/%s/capabilities", url.PathEscape(name)), url.Values{}, nil, &out, options...); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (client *Client) GetVectorStoreCapabilitiesWithPerf(ctx context.Context, name string, options ...RequestOption) (*LayerResponse[CapabilitiesReport], error) {
+	out := CapabilitiesReport{}
+	perf, err := client.request(ctx, "GET", fmt.Sprintf("/v2/vectorstores/%s/capabilities", url.PathEscape(name)), url.Values{}, nil, &out, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &LayerResponse[CapabilitiesReport]{Data: out, Perf: *perf}, nil
 }
 
 
@@ -2729,12 +2768,13 @@ func decodeError(statusCode int, data []byte) error {
 	var payload struct {
 		Error string `json:"error"`
 		Message string `json:"message"`
+		Feature string `json:"feature"`
 	}
 	_ = json.Unmarshal(data, &payload)
 	if payload.Message == "" {
 		payload.Message = strings.TrimSpace(string(data))
 	}
-	return &HevlayerError{StatusCode: statusCode, Kind: payload.Error, Message: payload.Message, Body: data}
+	return &HevlayerError{StatusCode: statusCode, Kind: payload.Error, Message: payload.Message, Feature: payload.Feature, Body: data}
 }
 
 func addQueryValue(query url.Values, name string, value interface{}) error {

@@ -49,6 +49,7 @@ and pipeline/scan/warm-cache helper methods.
 - `GetKey`
 - `GetLicense`
 - `GetMetricCatalogEntry`
+- `GetNamespaceCapabilities`
 - `GetNamespaceMetadata`
 - `GetNamespaceSnapshot`
 - `GetPipelineDocumentChunks`
@@ -62,6 +63,7 @@ and pipeline/scan/warm-cache helper methods.
 - `GetUdf`
 - `GetUdfStatus`
 - `GetVectorstore`
+- `GetVectorStoreCapabilities`
 - `GetWarehouse`
 - `GetWarmJob`
 - `HeartbeatDocuments`
