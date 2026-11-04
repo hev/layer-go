@@ -18,11 +18,14 @@ and pipeline/scan/warm-cache helper methods.
 
 ## Generated Operations
 
+- `ActivateRecordVersion`
+- `AggregateLatest`
 - `AuthenticateKey`
 - `BatchQueryNamespace`
 - `BranchNamespace`
 - `ClaimDocuments`
 - `ClaimUdfItems`
+- `CompareUdfCandidate`
 - `CompleteUdfItems`
 - `CopyNamespace`
 - `CreateCheckpoint`
@@ -30,11 +33,13 @@ and pipeline/scan/warm-cache helper methods.
 - `CreateScan`
 - `CreateSnapshot`
 - `CreateUdf`
+- `CreateUdfCandidate`
 - `DeleteKey`
 - `DeleteNamespace`
 - `DeletePipeline`
 - `DeleteScan`
 - `DeleteUdf`
+- `DiscardUdfCandidate`
 - `DiscoverUdf`
 - `EvaluateTurbopufferRecall`
 - `ExplainTurbopufferQuery`
@@ -54,6 +59,7 @@ and pipeline/scan/warm-cache helper methods.
 - `GetNamespaceSnapshot`
 - `GetPipelineDocumentChunks`
 - `GetPipelineStatus`
+- `GetRecordVersion`
 - `GetScan`
 - `GetScanResults`
 - `GetSnapshotJob`
@@ -61,6 +67,7 @@ and pipeline/scan/warm-cache helper methods.
 - `GetTurbopufferNamespaceSchema`
 - `GetTurbopufferV1NamespaceMetadata`
 - `GetUdf`
+- `GetUdfCandidate`
 - `GetUdfStatus`
 - `GetVectorstore`
 - `GetVectorStoreCapabilities`
@@ -78,6 +85,8 @@ and pipeline/scan/warm-cache helper methods.
 - `ListNamespaceHistory`
 - `ListNamespaces`
 - `ListPipelines`
+- `ListRecordActivations`
+- `ListRecordVersions`
 - `ListScans`
 - `ListSearchHistory`
 - `ListSnapshotActivity`
@@ -87,11 +96,15 @@ and pipeline/scan/warm-cache helper methods.
 - `ListVectorstores`
 - `ListWarehouses`
 - `ListWarmJobs`
+- `LookupUdfSiblings`
 - `MintKey`
 - `PauseUdf`
+- `PromoteUdfCandidate`
 - `PutBlob`
 - `PutPipelineDocumentChunks`
+- `PutPipelineDocumentRows`
 - `PutPipelineDocumentVectors`
+- `PutPipelineRows`
 - `PutSnapshotPolicy`
 - `Query`
 - `QueryAgent`
@@ -104,6 +117,8 @@ and pipeline/scan/warm-cache helper methods.
 - `ResetFailedUdf`
 - `ResumeUdf`
 - `RevokeKey`
+- `ScanSourceRows`
+- `SearchNamespace`
 - `SetDocumentsStage`
 - `UpdateTurbopufferNamespaceMetadata`
 - `UpdateTurbopufferNamespaceSchema`

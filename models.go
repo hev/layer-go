@@ -2,6 +2,104 @@ package hevlayer
 
 type JSONValue = interface{}
 
+type ProjectedSourceRequest struct {
+	IncludeAttributes []string `json:"include_attributes"`
+	Scan map[string]interface{} `json:"scan"`
+}
+
+type ProjectedSourceResponse struct {
+	Rows []map[string]interface{} `json:"rows"`
+	Source map[string]interface{} `json:"source"`
+}
+
+type CdcFailure struct {
+	Error map[string]interface{} `json:"error"`
+	Cdc CdcMutationReceipt `json:"cdc,omitempty"`
+}
+
+type CdcReplayRequest struct {
+	ExpectedReceiptVersion int64 `json:"expectedReceiptVersion"`
+}
+
+type CdcMutationResponse struct {
+	Cdc interface{} `json:"cdc"`
+}
+
+type CdcMutationReceipt struct {
+	MutationID string `json:"mutationId"`
+	Epoch string `json:"epoch"`
+	NamespaceIncarnation string `json:"namespaceIncarnation"`
+	Sequence int64 `json:"sequence"`
+	ReceiptVersion int64 `json:"receiptVersion"`
+	InputHash string `json:"inputHash"`
+	State string `json:"state"`
+	SourceVersion string `json:"sourceVersion,omitempty"`
+	Destinations map[string]interface{} `json:"destinations"`
+	Embedding map[string]interface{} `json:"embedding"`
+	ReplayEligible bool `json:"replayEligible"`
+}
+
+type CdcObserveReceipt struct {
+	Epoch string `json:"epoch"`
+	NamespaceIncarnation string `json:"namespaceIncarnation"`
+	ReceiptVersion int64 `json:"receiptVersion"`
+	Namespace string `json:"namespace"`
+	RequestBytes int64 `json:"requestBytes"`
+	Capture CdcObserveInspection `json:"capture"`
+	Mode string `json:"mode"`
+	State string `json:"state"`
+	MutationID string `json:"mutationId"`
+	Sequence int64 `json:"sequence"`
+	InputHash string `json:"inputHash"`
+	Observation map[string]interface{} `json:"observation"`
+	Destination map[string]interface{} `json:"destination"`
+	ReplayEligible string `json:"replayEligible"`
+}
+
+type CdcObserveInspection struct {
+	Name string `json:"name"`
+	Mode string `json:"mode"`
+	Ready string `json:"ready"`
+	Namespaces []string `json:"namespaces"`
+	Prefixes []string `json:"prefixes"`
+	CapturedCount int64 `json:"capturedCount"`
+	RetainedCount int64 `json:"retainedCount"`
+	EvictedCount int64 `json:"evictedCount"`
+	ProcessGaps map[string]int64 `json:"processGaps"`
+	LastCapturedAt *int64 `json:"lastCapturedAt"`
+	GapCount int64 `json:"gapCount"`
+	Gaps map[string]int64 `json:"gaps"`
+	CountersScope string `json:"countersScope"`
+	Buffer map[string]interface{} `json:"buffer"`
+	Destination map[string]interface{} `json:"destination"`
+}
+
+type CdcReference struct {
+	Name string `json:"name"`
+}
+
+type CdcCondition struct {
+	Type string `json:"type"`
+	Status string `json:"status"`
+	Reason *string `json:"reason"`
+	Message *string `json:"message"`
+	LastTransitionTime *string `json:"lastTransitionTime"`
+}
+
+type CdcInspection struct {
+	Name string `json:"name"`
+	Generation int64 `json:"generation"`
+	ObservedGeneration *int64 `json:"observedGeneration"`
+	SourceRef CdcReference `json:"sourceRef"`
+	DestinationRef CdcReference `json:"destinationRef"`
+	BufferRef CdcReference `json:"bufferRef"`
+	Namespaces []string `json:"namespaces"`
+	CaptureRequested string `json:"captureRequested"`
+	CaptureState string `json:"captureState"`
+	Ready bool `json:"ready"`
+	Conditions []CdcCondition `json:"conditions"`
+}
+
 type LicenseSurfaceState struct {
 	State string `json:"state"`
 	SecondsToDeadline int64 `json:"seconds_to_deadline"`
@@ -119,6 +217,7 @@ type PutVectorsRequest struct {
 
 type CreateUdfRequest struct {
 	ID string `json:"id"`
+	Paused bool `json:"paused,omitempty"`
 	Spec UdfSpec `json:"spec"`
 }
 
@@ -144,6 +243,8 @@ type GetUdfResponse struct {
 }
 
 type UdfStatus struct {
+	QueryBudget UdfQueryBudget `json:"query_budget,omitempty"`
+	Backfill UdfBackfillStatus `json:"backfill,omitempty"`
 	UdfID string `json:"udf_id"`
 	Paused bool `json:"paused"`
 	ActiveNamespaces []string `json:"active_namespaces"`
@@ -157,14 +258,65 @@ type UdfStatus struct {
 }
 
 type UdfDiscoveryStatus struct {
+	ConsecutiveFailures int64 `json:"consecutive_failures,omitempty"`
+	PauseReason string `json:"pause_reason,omitempty"`
 	SweepsCompleted int64 `json:"sweeps_completed"`
 	LastCompletedAt *string `json:"last_completed_at"`
+}
+
+type UdfBackfillStatus struct {
+	Version string `json:"version"`
+	ScanComplete bool `json:"scan_complete"`
+	Pages int64 `json:"pages"`
+	RowsScanned int64 `json:"rows_scanned"`
+	Queries int64 `json:"queries"`
+	MetadataRequests int64 `json:"metadata_requests"`
+	GroupQueries int64 `json:"group_queries"`
+	QueriedBytes int64 `json:"queried_bytes"`
+	ReturnedBytes int64 `json:"returned_bytes"`
+	RowsDone int64 `json:"rows_done"`
+	HeldPending int64 `json:"held_pending"`
+	HeldProcessing int64 `json:"held_processing"`
+	HeldFailed int64 `json:"held_failed"`
+	LegacyPending int64 `json:"legacy_pending"`
+	LegacyProcessing int64 `json:"legacy_processing"`
+	LegacyFailed int64 `json:"legacy_failed"`
+	BilledQueriedBytesPerRow float64 `json:"billed_queried_bytes_per_row,omitempty"`
+}
+
+type UdfQueryBudget struct {
+	QueriesPerItem *int64 `json:"queries_per_item"`
+	ProviderQueries int64 `json:"provider_queries"`
+	RejectedQueries int64 `json:"rejected_queries"`
+	ExhaustedItems int64 `json:"exhausted_items"`
+	DiscoveryQueries int64 `json:"discovery_queries"`
+}
+
+type UdfLookupRequest struct {
+	WorkerID string `json:"worker_id"`
+	Namespace string `json:"namespace"`
+	ID string `json:"id"`
+	InputRevision int64 `json:"input_revision"`
+	IncludeAttributes []string `json:"include_attributes,omitempty"`
+}
+
+type UdfLookupResponse struct {
+	UdfID string `json:"udf_id"`
+	Namespace string `json:"namespace"`
+	ParentID string `json:"parent_id"`
+	PageTwoID *string `json:"page_two_id"`
+	Documents []Document `json:"documents"`
 }
 
 type UdfSpec struct {
 	IndexSelector interface{} `json:"index_selector,omitempty"`
 	TargetNamespaces []string `json:"target_namespaces,omitempty"`
+	QueriesPerItem int64 `json:"queries_per_item,omitempty"`
 	Inputs []string `json:"inputs,omitempty"`
+	AttemptLimit int64 `json:"attempt_limit,omitempty"`
+	AttemptRun string `json:"attempt_run,omitempty"`
+	DiscoveryOnce bool `json:"discovery_once,omitempty"`
+	Backfill bool `json:"backfill,omitempty"`
 	Version string `json:"version,omitempty"`
 	Filter interface{} `json:"filter,omitempty"`
 	Worker UdfWorkerSpec `json:"worker"`
@@ -172,6 +324,57 @@ type UdfSpec struct {
 	Retry UdfRetrySpec `json:"retry,omitempty"`
 	Triggers []UdfTrigger `json:"triggers,omitempty"`
 	Invalidates []string `json:"invalidates,omitempty"`
+	GroupByParent bool `json:"group_by_parent,omitempty"`
+	Candidate UdfCandidateSpec `json:"candidate,omitempty"`
+}
+
+type UdfCandidateSpec struct {
+	Of string `json:"of"`
+	Outputs []string `json:"outputs"`
+}
+
+type UdfCandidateRequest struct {
+	Version string `json:"version"`
+	Outputs []string `json:"outputs"`
+	Inputs []string `json:"inputs,omitempty"`
+	Filter interface{} `json:"filter,omitempty"`
+	Worker UdfWorkerSpec `json:"worker,omitempty"`
+	TargetNamespaces []string `json:"target_namespaces,omitempty"`
+}
+
+type UdfCandidatePromoteRequest struct {
+	AllowPartial bool `json:"allow_partial,omitempty"`
+	Namespaces []string `json:"namespaces,omitempty"`
+}
+
+type UdfCandidatePromoteResponse struct {
+	UdfID string `json:"udf_id"`
+	PromotedRows int64 `json:"promoted_rows"`
+	Version string `json:"version"`
+}
+
+type UdfCandidateComparison struct {
+	UdfID string `json:"udf_id"`
+	CandidateID string `json:"candidate_id"`
+	LiveVersion string `json:"live_version"`
+	CandidateVersion string `json:"candidate_version"`
+	RowsCompared int64 `json:"rows_compared"`
+	RowsAgreed int64 `json:"rows_agreed"`
+	AgreementRate *float64 `json:"agreement_rate"`
+	Truncated bool `json:"truncated"`
+	PendingCount int64 `json:"pending_count"`
+	ProcessingCount int64 `json:"processing_count"`
+	FailedCount int64 `json:"failed_count"`
+	Outputs []UdfCandidateOutputComparison `json:"outputs"`
+	Disagreements []map[string]interface{} `json:"disagreements"`
+}
+
+type UdfCandidateOutputComparison struct {
+	Output string `json:"output"`
+	Compared int64 `json:"compared"`
+	Agreed int64 `json:"agreed"`
+	AgreementRate *float64 `json:"agreement_rate"`
+	Confusion map[string]map[string]int64 `json:"confusion"`
 }
 
 type UdfTrigger string
@@ -201,12 +404,17 @@ type UdfRetrySpec struct {
 type UdfDiscoverRequest struct {
 	Namespaces []string `json:"namespaces,omitempty"`
 	PageSize int64 `json:"page_size,omitempty"`
+	MaxPages int64 `json:"max_pages,omitempty"`
+	Cursor string `json:"cursor,omitempty"`
 }
 
 type UdfDiscoverResponse struct {
 	UdfID string `json:"udf_id"`
 	Enqueued int64 `json:"enqueued"`
 	Namespaces []string `json:"namespaces"`
+	PagesScanned int64 `json:"pages_scanned"`
+	Complete bool `json:"complete"`
+	NextCursor string `json:"next_cursor,omitempty"`
 }
 
 type UdfClaimRequest struct {
@@ -218,7 +426,30 @@ type UdfClaimRequest struct {
 type UdfClaimedItem struct {
 	Namespace string `json:"namespace"`
 	ID string `json:"id"`
+	PreparedReceipt UdfPreparedReceipt `json:"prepared_receipt,omitempty"`
+	InputRevision int64 `json:"input_revision,omitempty"`
 	Input map[string]interface{} `json:"input"`
+	InputSnapshot bool `json:"input_snapshot,omitempty"`
+	Pages []UdfClaimedPage `json:"pages,omitempty"`
+}
+
+type UdfClaimedPage struct {
+	ID string `json:"id"`
+	InputRevision int64 `json:"input_revision"`
+	PreparedReceipt UdfPreparedReceipt `json:"prepared_receipt,omitempty"`
+	Input map[string]interface{} `json:"input"`
+}
+
+type UdfPageRef struct {
+	ID string `json:"id"`
+	InputRevision int64 `json:"input_revision,omitempty"`
+	PreparedInputRevision int64 `json:"prepared_input_revision,omitempty"`
+}
+
+type UdfPreparedReceipt struct {
+	InputRevision int64 `json:"input_revision"`
+	IntentDigest string `json:"intent_digest"`
+	OutputDigest string `json:"output_digest"`
 }
 
 type UdfClaimResponse struct {
@@ -230,6 +461,7 @@ type UdfClaimResponse struct {
 type UdfItemRef struct {
 	Namespace string `json:"namespace"`
 	ID string `json:"id"`
+	Pages []UdfPageRef `json:"pages,omitempty"`
 }
 
 type UdfHeartbeatRequest struct {
@@ -238,6 +470,7 @@ type UdfHeartbeatRequest struct {
 }
 
 type UdfCompleteRequest struct {
+	ReportDispositions bool `json:"report_dispositions,omitempty"`
 	WorkerID string `json:"worker_id"`
 	Items []UdfCompleteItem `json:"items"`
 }
@@ -245,9 +478,12 @@ type UdfCompleteRequest struct {
 type UdfCompleteItem struct {
 	Namespace string `json:"namespace"`
 	ID string `json:"id"`
+	PreparedInputRevision int64 `json:"prepared_input_revision,omitempty"`
+	InputRevision int64 `json:"input_revision,omitempty"`
 	Vector []float64 `json:"vector,omitempty"`
 	Vectors [][]float64 `json:"vectors,omitempty"`
 	Attributes map[string]interface{} `json:"attributes,omitempty"`
+	Pages []UdfPageRef `json:"pages,omitempty"`
 }
 
 type UdfErrorKind string
@@ -262,11 +498,19 @@ type UdfFailItem struct {
 	ID string `json:"id"`
 	Kind UdfErrorKind `json:"kind"`
 	Message string `json:"message,omitempty"`
+	Pages []UdfPageRef `json:"pages,omitempty"`
 }
 
 type UdfItemsResponse struct {
 	UdfID string `json:"udf_id"`
 	Updated int64 `json:"updated"`
+	Items []UdfCompletionOutcome `json:"items,omitempty"`
+}
+
+type UdfCompletionOutcome struct {
+	Index int64 `json:"index"`
+	Reason string `json:"reason,omitempty"`
+	Disposition string `json:"disposition"`
 }
 
 type CostWindow string
@@ -380,7 +624,7 @@ type Document struct {
 }
 
 type FetchDocumentsRequest struct {
-	Ids []string `json:"ids"`
+	Ids []interface{} `json:"ids"`
 	IncludeAttributes []string `json:"include_attributes,omitempty"`
 }
 
@@ -420,6 +664,66 @@ type TurbopufferMetadataPatch struct {
 	Pinning interface{} `json:"pinning,omitempty"`
 }
 
+type PutPipelineBulkRowsRequest struct {
+	Documents []map[string]interface{} `json:"documents"`
+	Schema map[string]interface{} `json:"schema,omitempty"`
+	DistanceMetric string `json:"distance_metric,omitempty"`
+}
+
+type PutPipelineRowsRequest struct {
+	PatchCondition interface{} `json:"patch_condition,omitempty"`
+	PatchRows []map[string]interface{} `json:"patch_rows,omitempty"`
+	UpsertRows []map[string]interface{} `json:"upsert_rows,omitempty"`
+	Schema map[string]interface{} `json:"schema,omitempty"`
+	DistanceMetric string `json:"distance_metric,omitempty"`
+}
+
+type RecordVersionOptions struct {
+	Versioning map[string]interface{} `json:"versioning,omitempty"`
+	VersionID string `json:"version_id,omitempty"`
+}
+
+type RecordVersionReceipt struct {
+	ID string `json:"id"`
+	VersionID string `json:"version_id"`
+	Active bool `json:"active"`
+}
+
+type RecordVersion struct {
+	ID string `json:"id"`
+	VersionID string `json:"version_id"`
+	Row map[string]interface{} `json:"row"`
+	CreatedAt string `json:"created_at"`
+}
+
+type RecordVersionList struct {
+	Versions []RecordVersion `json:"versions"`
+	ActiveVersionID *string `json:"active_version_id"`
+	NextCursor *string `json:"next_cursor"`
+}
+
+type RecordActivationRequest struct {
+	VersionID string `json:"version_id"`
+	ExpectedCurrentVersion *string `json:"expected_current_version"`
+}
+
+type RecordActivationResult struct {
+	ID string `json:"id"`
+	ActiveVersionID string `json:"active_version_id"`
+}
+
+type RecordActivation struct {
+	Sequence int64 `json:"sequence"`
+	PreviousVersionID *string `json:"previous_version_id"`
+	VersionID *string `json:"version_id"`
+	CreatedAt string `json:"created_at"`
+}
+
+type RecordActivationList struct {
+	Activations []RecordActivation `json:"activations"`
+	NextCursor *string `json:"next_cursor"`
+}
+
 type TurbopufferWriteRequest map[string]interface{}
 
 type TurbopufferBranchFromRequest struct {
@@ -431,6 +735,7 @@ type TurbopufferCopyFromRequest struct {
 }
 
 type TurbopufferWriteResponse struct {
+	Versions []RecordVersionReceipt `json:"versions,omitempty"`
 	Status string `json:"status"`
 	Message string `json:"message"`
 	RowsAffected int64 `json:"rows_affected"`
@@ -445,9 +750,159 @@ type TurbopufferWriteResponse struct {
 	Performance map[string]interface{} `json:"performance,omitempty"`
 }
 
+type LatestWinnerOrder struct {
+	Field string `json:"field"`
+	Direction string `json:"direction"`
+	Nulls string `json:"nulls"`
+	CanonicalKey string `json:"canonical_key,omitempty"`
+}
+
+type LatestBy struct {
+	Key []string `json:"key"`
+	OrderBy []LatestWinnerOrder `json:"order_by"`
+}
+
+type LatestScanBudget struct {
+	MaxRows int64 `json:"max_rows"`
+	MaxBytes int64 `json:"max_bytes"`
+	Consistency string `json:"consistency"`
+}
+
+type LatestRelationMetadata struct {
+	Complete bool `json:"complete"`
+	Consistency string `json:"consistency"`
+	ReadBoundary string `json:"read_boundary"`
+	SourceRows int64 `json:"source_rows"`
+	SourcePages int64 `json:"source_pages"`
+	SourceBytes int64 `json:"source_bytes"`
+	SelectedRows int64 `json:"selected_rows"`
+	MatchingRows int64 `json:"matching_rows"`
+	Plan string `json:"plan"`
+}
+
+type LatestGroupDimensionField struct {
+	Kind string `json:"kind"`
+	Field string `json:"field"`
+}
+
+type LatestGroupDimensionUtcDay struct {
+	Kind string `json:"kind"`
+	Field string `json:"field"`
+}
+
+type LatestGroupDimensionWeekday struct {
+	Kind string `json:"kind"`
+}
+
+type LatestGroupDimensionHour struct {
+	Kind string `json:"kind"`
+}
+
+type LatestGroupDimensionModel struct {
+	Kind string `json:"kind"`
+}
+
+type LatestGroupExpansionTimestamps struct {
+	Kind string `json:"kind"`
+	Field string `json:"field"`
+	Timezone string `json:"timezone"`
+}
+
+type LatestGroupExpansionModels struct {
+	Kind string `json:"kind"`
+	Field string `json:"field"`
+}
+
+type LatestGroupMetricCount struct {
+	Kind string `json:"kind"`
+}
+
+type LatestGroupMetricSum struct {
+	Kind string `json:"kind"`
+	Field string `json:"field"`
+}
+
+type LatestGroupMetricModelSum struct {
+	Kind string `json:"kind"`
+	Field string `json:"field"`
+}
+
+type LatestGroupKeyNull struct {
+	Type string `json:"type"`
+}
+
+type LatestGroupKeyBool struct {
+	Type string `json:"type"`
+	Value bool `json:"value"`
+}
+
+type LatestGroupKeyNumber struct {
+	Type string `json:"type"`
+	Value string `json:"value"`
+}
+
+type LatestGroupKeyString struct {
+	Type string `json:"type"`
+	Value string `json:"value"`
+}
+
+type LatestGroupDimension interface{}
+
+type LatestGroupExpansion interface{}
+
+type LatestGroupMetric interface{}
+
+type LatestGroupedPlan struct {
+	GroupBy []LatestGroupDimension `json:"group_by"`
+	Expand LatestGroupExpansion `json:"expand,omitempty"`
+	Metrics map[string]LatestGroupMetric `json:"metrics"`
+	PageSize int64 `json:"page_size"`
+	Cursor string `json:"cursor,omitempty"`
+}
+
+type LatestGroupKey interface{}
+
+type LatestGroup struct {
+	Key []LatestGroupKey `json:"key"`
+	Aggregates map[string]float64 `json:"aggregates"`
+}
+
+type LatestGroupRelationBinding struct {
+	Scope string `json:"scope"`
+	ReadBoundary string `json:"read_boundary"`
+	Complete bool `json:"complete"`
+	Consistency string `json:"consistency"`
+}
+
+type LatestGroupPage struct {
+	Groups []LatestGroup `json:"groups"`
+	NextCursor *string `json:"next_cursor"`
+	Complete bool `json:"complete"`
+	TotalGroups int64 `json:"total_groups"`
+	Relation LatestGroupRelationBinding `json:"relation"`
+	Binding string `json:"binding"`
+	SelectedRows int64 `json:"selected_rows"`
+	ExpandedInstances int64 `json:"expanded_instances"`
+}
+
+type LatestRelationRequest struct {
+	LatestBy LatestBy `json:"latest_by"`
+	Scan LatestScanBudget `json:"scan"`
+	Filters interface{} `json:"filters,omitempty"`
+	AggregateBy map[string]interface{} `json:"aggregate_by"`
+	Grouped map[string]LatestGroupedPlan `json:"grouped,omitempty"`
+}
+
+type LatestRelationResponse struct {
+	Aggregations map[string]interface{} `json:"aggregations"`
+	Relation LatestRelationMetadata `json:"relation"`
+	Grouped map[string]LatestGroupPage `json:"grouped,omitempty"`
+}
+
 type TurbopufferQueryRequest map[string]interface{}
 
 type TurbopufferQueryResponse struct {
+	Relation LatestRelationMetadata `json:"relation,omitempty"`
 	Rows []map[string]interface{} `json:"rows,omitempty"`
 	Aggregations map[string]interface{} `json:"aggregations,omitempty"`
 	AggregationGroups []map[string]interface{} `json:"aggregation_groups,omitempty"`
@@ -725,6 +1180,8 @@ type NamespaceList struct {
 
 type NamespaceListEntry struct {
 	Name string `json:"name"`
+	Title string `json:"title,omitempty"`
+	Description string `json:"description,omitempty"`
 	RowCount int64 `json:"row_count,omitempty"`
 	SizeBytes int64 `json:"size_bytes,omitempty"`
 	StableAsOfMs int64 `json:"stable_as_of_ms,omitempty"`
@@ -767,7 +1224,27 @@ type NamespaceMetadata struct {
 	Layer NamespaceMetadataLayer `json:"layer,omitempty"`
 }
 
+type NamespaceFieldStats struct {
+	AsOf int64 `json:"as_of,omitempty"`
+	Rows int64 `json:"rows,omitempty"`
+	Fields map[string]FieldStat `json:"fields,omitempty"`
+	Untracked []string `json:"untracked,omitempty"`
+}
+
+type FieldStat struct {
+	Missing int64 `json:"missing"`
+	Distinct map[string]interface{} `json:"distinct"`
+	Min float64 `json:"min,omitempty"`
+	Max float64 `json:"max,omitempty"`
+	Top []map[string]interface{} `json:"top,omitempty"`
+	State string `json:"state"`
+	ApproximateSince int64 `json:"approximate_since,omitempty"`
+}
+
 type NamespaceMetadataLayer struct {
+	Title string `json:"title,omitempty"`
+	Description string `json:"description,omitempty"`
+	FieldStats NamespaceFieldStats `json:"field_stats,omitempty"`
 	StableAsOf int64 `json:"stable_as_of,omitempty"`
 	IsStable bool `json:"is_stable,omitempty"`
 	Indexed bool `json:"indexed,omitempty"`
@@ -799,6 +1276,7 @@ type QueryRequest struct {
 	AsOf int64 `json:"as_of,omitempty"`
 	Between []int64 `json:"between,omitempty"`
 	IncludeAttributes interface{} `json:"include_attributes,omitempty"`
+	Collapse CollapseRequest `json:"collapse,omitempty"`
 	IncludeLegBreakdown bool `json:"include_leg_breakdown,omitempty"`
 	Cursor string `json:"cursor,omitempty"`
 	RankBy []interface{} `json:"rank_by,omitempty"`
@@ -812,6 +1290,7 @@ type FederatedQueryRequest struct {
 	AsOf int64 `json:"as_of,omitempty"`
 	Between []int64 `json:"between,omitempty"`
 	IncludeAttributes interface{} `json:"include_attributes,omitempty"`
+	Collapse CollapseRequest `json:"collapse,omitempty"`
 	IncludeLegBreakdown bool `json:"include_leg_breakdown,omitempty"`
 	Cursor string `json:"cursor,omitempty"`
 	RankBy []interface{} `json:"rank_by,omitempty"`
@@ -898,11 +1377,159 @@ type QueryResponse struct {
 	NextCursor string `json:"next_cursor,omitempty"`
 	Hybrid HybridEcho `json:"hybrid,omitempty"`
 	Routing RoutingEcho `json:"routing,omitempty"`
+	Groups []CollapseGroup `json:"groups,omitempty"`
+	Collapse map[string]interface{} `json:"collapse,omitempty"`
+}
+
+type CollapseRequest struct {
+	By interface{} `json:"by"`
+	Expansion int64 `json:"expansion,omitempty"`
+	Missing interface{} `json:"missing,omitempty"`
+}
+
+type CollapseGroup struct {
+	Key interface{} `json:"key"`
+	By *string `json:"by"`
+	Rows []map[string]interface{} `json:"rows"`
+}
+
+type SearchRequest struct {
+	Query string `json:"query"`
+	TopK int64 `json:"top_k,omitempty"`
+	Filters interface{} `json:"filters,omitempty"`
+	IncludeAttributes interface{} `json:"include_attributes,omitempty"`
+	Pool int64 `json:"pool,omitempty"`
+	Embed SearchEmbedOptions `json:"embed,omitempty"`
+	Text SearchTextOptions `json:"text,omitempty"`
+	Rerank interface{} `json:"rerank,omitempty"`
+	Explain bool `json:"explain,omitempty"`
+	Collapse CollapseRequest `json:"collapse,omitempty"`
+}
+
+type SearchEmbedOptions struct {
+	Attribute string `json:"attribute,omitempty"`
+}
+
+type SearchTextOptions struct {
+	Fuzziness interface{} `json:"fuzziness,omitempty"`
+	Stopwords interface{} `json:"stopwords,omitempty"`
+}
+
+type SearchRerankOptions struct {
+	Provider string `json:"provider,omitempty"`
+	Threshold float64 `json:"threshold,omitempty"`
+	Attributes []string `json:"attributes,omitempty"`
+	DocsPerCall int64 `json:"docs_per_call,omitempty"`
+	MaxChars int64 `json:"max_chars,omitempty"`
+	Question string `json:"question,omitempty"`
+	Required bool `json:"required,omitempty"`
+}
+
+type SearchResponse struct {
+	Rows []SearchRow `json:"rows"`
+	Groups []SearchCollapseGroup `json:"groups,omitempty"`
+	Collapse map[string]interface{} `json:"collapse,omitempty"`
+	Routing SearchRoutingEcho `json:"routing"`
+	Plan SearchPlanEcho `json:"plan"`
+	Hybrid SearchHybridEcho `json:"hybrid"`
+	Rerank SearchRerankEcho `json:"rerank"`
+	Performance SearchPerformance `json:"performance"`
+}
+
+type SearchCollapseGroup struct {
+	Key interface{} `json:"key"`
+	By *string `json:"by"`
+	Rows []SearchRow `json:"rows"`
+}
+
+type SearchRow struct {
+	ID interface{} `json:"id"`
+	Score float64 `json:"score"`
+	Attributes map[string]interface{} `json:"attributes"`
+	Explain SearchRowExplain `json:"explain,omitempty"`
+}
+
+type SearchRowExplain struct {
+	Features SearchL1Features `json:"features"`
+	Contributions SearchL1Features `json:"contributions"`
+	L1Score float64 `json:"l1_score"`
+	Legs []map[string]interface{} `json:"legs"`
+}
+
+type SearchL1Features struct {
+	RrfSum float64 `json:"rrf_sum"`
+	FetchCount30d float64 `json:"fetch_count_30d,omitempty"`
+	AgeSeconds float64 `json:"age_seconds,omitempty"`
+}
+
+type SearchRoutingEcho struct {
+	Route string `json:"route"`
+	Policy string `json:"policy"`
+	Tokens int64 `json:"tokens"`
+	Executed bool `json:"executed"`
+	Advisory bool `json:"advisory"`
+}
+
+type SearchPlanEcho struct {
+	Executed bool `json:"executed"`
+	Reason string `json:"reason,omitempty"`
+}
+
+type SearchHybridEcho struct {
+	Tokens []string `json:"tokens"`
+	TokensDropped int64 `json:"tokens_dropped"`
+	Stopwords interface{} `json:"stopwords"`
+	StopwordsDropped []string `json:"stopwords_dropped"`
+	Fuzziness interface{} `json:"fuzziness"`
+	FuzzinessClamped bool `json:"fuzziness_clamped,omitempty"`
+	RankConstant int64 `json:"rank_constant"`
+	PerLegLimit int64 `json:"per_leg_limit"`
+	Legs []SearchLegEcho `json:"legs"`
+	DroppedLegs int64 `json:"dropped_legs"`
+	Threads int64 `json:"threads,omitempty"`
+	Surfaced bool `json:"surfaced"`
+}
+
+type SearchLegEcho struct {
+	Label string `json:"label"`
+	Kind string `json:"kind"`
+	Attribute string `json:"attribute,omitempty"`
+	Rows int64 `json:"rows"`
+}
+
+type SearchRerankEcho struct {
+	Provider string `json:"provider"`
+	Model string `json:"model,omitempty"`
+	Question string `json:"question"`
+	Executed bool `json:"executed"`
+	Reason string `json:"reason,omitempty"`
+	Pool int64 `json:"pool"`
+	Calls int64 `json:"calls"`
+	DocsPerCall int64 `json:"docs_per_call"`
+	Threshold float64 `json:"threshold"`
+	Pruned int64 `json:"pruned"`
+	InputTokens int64 `json:"input_tokens"`
+	LatencyMs int64 `json:"latency_ms"`
+}
+
+type SearchPerformance struct {
+	EmbeddingTokens float64 `json:"embedding_tokens,omitempty"`
+	EmbeddingMs float64 `json:"embedding_ms,omitempty"`
+	LegsMs int64 `json:"legs_ms"`
+	FuseMs int64 `json:"fuse_ms"`
+	L1Ms int64 `json:"l1_ms"`
+	RerankMs int64 `json:"rerank_ms"`
+	TotalMs int64 `json:"total_ms"`
 }
 
 type Error struct {
+	Reason string `json:"reason,omitempty"`
+	Disposition string `json:"disposition,omitempty"`
 	Error string `json:"error"`
 	Message string `json:"message"`
+	UpstreamStatus int64 `json:"upstream_status,omitempty"`
+	UpstreamCategory string `json:"upstream_category,omitempty"`
+	Retryable bool `json:"retryable,omitempty"`
 	Feature string `json:"feature,omitempty"`
 }
 
@@ -1128,7 +1755,23 @@ type RestWarehouse struct {
 type RestWarehouseAuth struct {
 	In string `json:"in"`
 	Name string `json:"name"`
+	SecretRef WarehouseSecretRef `json:"secretRef,omitempty"`
+	Prefix string `json:"prefix,omitempty"`
+	Login RestWarehouseLogin `json:"login,omitempty"`
+}
+
+type RestWarehouseLogin struct {
+	Path string `json:"path"`
+	Body map[string]interface{} `json:"body"`
 	SecretRef WarehouseSecretRef `json:"secretRef"`
+	TokenPath string `json:"tokenPath"`
+	ExpiresInPath string `json:"expiresInPath,omitempty"`
+	Refresh RestWarehouseRefresh `json:"refresh,omitempty"`
+}
+
+type RestWarehouseRefresh struct {
+	Path string `json:"path"`
+	Body map[string]interface{} `json:"body"`
 }
 
 type RestWarehouseRateLimit struct {

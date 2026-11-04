@@ -8,6 +8,60 @@ import (
 	"testing"
 )
 
+func TestLatestRelationTypedContract(t *testing.T) {
+    server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter,r *http.Request) {
+        if r.Method != http.MethodPost || r.URL.Path != "/v2/namespaces/ns/aggregate" {t.Fatalf("unexpected route: %s %s",r.Method,r.URL.Path)}
+        var body LatestRelationRequest
+        if err := json.NewDecoder(r.Body).Decode(&body); err != nil {t.Fatal(err)}
+        if body.Grouped["daily"].PageSize != 10 || len(body.Grouped["daily"].GroupBy) != 1 || body.LatestBy.Key[0] != "entity" || body.Scan.Consistency != "observed" || body.Scan.MaxRows != 20000 {t.Fatalf("unexpected latest plan: %#v",body)}
+        w.Header().Set("Content-Type","application/json")
+        _, _ = w.Write([]byte(`{"grouped":{"daily":{"groups":[],"complete":true,"total_groups":0,"relation":{"complete":true,"scope":"executor","read_boundary":"observed_pages","consistency":"observed_scan"},"binding":"test","selected_rows":0,"expanded_instances":0}},"aggregations":{"n":10007},"relation":{"complete":true,"consistency":"observed","read_boundary":"observed_pages","source_rows":20014,"source_pages":21,"source_bytes":1000,"selected_rows":10007,"matching_rows":10007,"plan":"bounded_source_scan"}}`))
+    }))
+    defer server.Close()
+    client := NewClient(WithBaseURL(server.URL))
+    got,err := client.AggregateLatest(context.Background(),"ns",&LatestRelationRequest{
+        LatestBy:LatestBy{Key:[]string{"entity"},OrderBy:[]LatestWinnerOrder{{Field:"version",Direction:"desc",Nulls:"last"}}},
+        Scan:LatestScanBudget{MaxRows:20000,MaxBytes:1000000,Consistency:"observed"},
+        AggregateBy:map[string]interface{}{"n":[]interface{}{"Count"}},
+        Grouped:map[string]LatestGroupedPlan{"daily":{GroupBy:[]LatestGroupDimension{LatestGroupDimensionUtcDay{Kind:"utc_day",Field:"day"}},Metrics:map[string]LatestGroupMetric{"n":LatestGroupMetricCount{Kind:"count"}},PageSize:10}},
+    })
+    if err != nil {t.Fatal(err)}
+    if !got.Grouped["daily"].Relation.Complete || !got.Grouped["daily"].Complete || got.Aggregations["n"] != float64(10007) || !got.Relation.Complete || got.Relation.Consistency != "observed" {t.Fatalf("bad compact response: %#v",got)}
+}
+
+func TestNamespaceMetadataFieldStatsParams(t *testing.T) {
+	ctx := context.Background()
+	queries := []string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		queries = append(queries, r.URL.RawQuery)
+		layer := map[string]interface{}{}
+		if r.URL.Query().Get("field_stats") == "true" {
+			layer["field_stats"] = map[string]interface{}{"rows": 2, "fields": map[string]interface{}{"kind": map[string]interface{}{"missing": 0, "distinct": map[string]interface{}{"value": 1, "quality": "exact"}, "state": "exact"}}}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"id": "ns", "schema": map[string]interface{}{}, "approx_logical_bytes": 0, "approx_row_count": 2, "created_at": "now", "updated_at": "now", "layer": layer})
+	}))
+	defer server.Close()
+	client := NewClient(WithBaseURL(server.URL), WithAPIKey("test-token"))
+	plain, err := client.GetNamespaceMetadata(ctx, "ns", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain.Layer.FieldStats.Fields != nil {
+		t.Fatalf("field stats present without the parameter: %#v", plain.Layer)
+	}
+	stats, err := client.GetNamespaceMetadata(ctx, "ns", &GetNamespaceMetadataParams{FieldStats: true, FieldStatsTop: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Layer.FieldStats.Fields["kind"].State != "exact" {
+		t.Fatalf("missing field stats: %#v", stats.Layer)
+	}
+	if len(queries) != 2 || queries[0] != "" || queries[1] != "field_stats=true&field_stats_top=5" {
+		t.Fatalf("unexpected queries: %#v", queries)
+	}
+}
+
 func TestClientCoreOperations(t *testing.T) {
 	ctx := context.Background()
 	seen := map[string]bool{}
